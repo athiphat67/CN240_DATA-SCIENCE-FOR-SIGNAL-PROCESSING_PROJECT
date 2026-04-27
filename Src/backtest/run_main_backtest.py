@@ -152,7 +152,12 @@ class CandleCache:
             return None
 
     def set(self, ts: pd.Timestamp, data: dict):
-        self._path(ts).write_text(
+        p = self._path(ts)
+        
+        # 🟢 เพิ่มคำสั่งนี้: ให้เช็คและสร้างโฟลเดอร์ก่อนเขียนไฟล์เสมอ (ถ้าไม่มีจะสร้างให้)
+        p.parent.mkdir(parents=True, exist_ok=True) 
+        
+        p.write_text(
             json.dumps(data, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
@@ -538,7 +543,8 @@ class MainPipelineBacktest:
             if isinstance(resp, dict) and "signal" in resp:
                 llm_signal = resp.get("signal", "HOLD")
                 llm_confidence = float(resp.get("confidence", 0.5))
-                llm_rationale = resp.get("rationale", "")
+                # ใช้ 'or ""' เพื่อบังคับว่าถ้าดึงมาแล้วเป็น None หรือค่าว่าง ให้กลายเป็น "" เสมอ
+                llm_rationale = resp.get("rationale") or ""
                 break
 
         # ── Session check ────────────────────────────────────

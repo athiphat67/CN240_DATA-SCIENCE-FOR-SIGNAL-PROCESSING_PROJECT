@@ -194,6 +194,14 @@ class GoldTradingOrchestrator:
             "mid_price_thb", round((sell + buy) / 2, 2) if sell and buy else 0
         )
         thai.setdefault("timestamp", thai.get("timestamp", now_thai))
+        spread_thb = round(float(sell) - float(buy), 2) if sell and buy else 0.0
+        effective_spread = spread_thb
+
+        # expected move (THB) estimate from latest candle % change
+        trend_change_pct = abs(float((price_trend or {}).get("change_pct", 0.0) or 0.0))
+        ref_price = float(thai.get("mid_price_thb") or sell or 0.0)
+        expected_move_thb = round(ref_price * (trend_change_pct / 100.0), 2) if ref_price > 0 else 0.0
+        edge_score = round((expected_move_thb / effective_spread), 4) if effective_spread > 0 else 0.0
 
         # ── forex: [FIX B5] รับ source จาก fetch_price ด้วย ──────────────────
         forex_data = price.get("forex", {})
@@ -233,6 +241,19 @@ class GoldTradingOrchestrator:
         latest_news = latest_news[:10]
 
         effective_interval = interval or self.interval
+        portfolio = price.get("portfolio", {}) if isinstance(price.get("portfolio", {}), dict) else {}
+        trades_today = int(portfolio.get("trades_today", 0) or 0)
+        daily_target_entries = 6
+        remaining_entries = max(0, daily_target_entries - trades_today)
+        now_hour = get_thai_time().hour
+        current_slot = min(6, max(1, (now_hour // 4) + 1))
+        min_entries_by_now = max(0, current_slot - 1)
+
+        # safety budget ladder (Phase C): late slots require higher confidence
+        slot_conf_ladder = [0.62, 0.62, 0.66, 0.68, 0.72, 0.75]
+        slot_pos_ladder = [1000, 1000, 1000, 1000, 1000, 1000]
+        next_slot_index = min(trades_today, daily_target_entries - 1)
+
         return {
             "meta": {
                 "agent": "gold-trading-agent",
@@ -248,6 +269,13 @@ class GoldTradingOrchestrator:
                 "spot_price_usd": spot,
                 "forex": forex,
                 "thai_gold_thb": thai,
+                "spread_coverage": {
+                    "spread_thb": spread_thb,
+                    "effective_spread": effective_spread,
+                    "expected_move_thb": expected_move_thb,
+                    "expected_move": expected_move_thb,
+                    "edge_score": edge_score,
+                },
                 "recent_price_action": price.get("recent_price_action", []),
                 "price_trend": price_trend or {},
             },
@@ -258,7 +286,17 @@ class GoldTradingOrchestrator:
                 "latest_news": latest_news,
                 "news_count": len(latest_news),
             },
-            "portfolio": {},
+            "portfolio": portfolio,
+            "execution_quota": {
+                "daily_target_entries": daily_target_entries,
+                "entries_done": trades_today,
+                "entries_remaining": remaining_entries,
+                "quota_met": trades_today >= daily_target_entries,
+                "current_slot": current_slot,
+                "min_entries_by_now": min_entries_by_now,
+                "required_confidence_for_next_buy": slot_conf_ladder[next_slot_index],
+                "recommended_next_position_thb": slot_pos_ladder[next_slot_index],
+            },
             "recent_trades": recent_trades or [],
             "interval": effective_interval,  # [FIX B2]
             "timestamp": now_thai,
@@ -279,6 +317,7 @@ class GoldTradingOrchestrator:
             "time",
             "date",
             "session_gate",
+            "execution_quota",
             "portfolio",
             "portfolio_summary",
             "backtest_directive",
@@ -296,6 +335,7 @@ class GoldTradingOrchestrator:
             "spot_price_usd": md.get("spot_price_usd", {}),
             "forex": md.get("forex", {}),
             "thai_gold_thb": md.get("thai_gold_thb", {}),
+            "spread_coverage": md.get("spread_coverage", {}),
             "price_trend": md.get("price_trend", {}),
         }
 

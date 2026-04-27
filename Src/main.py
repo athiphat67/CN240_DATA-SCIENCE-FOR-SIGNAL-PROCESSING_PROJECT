@@ -5,6 +5,7 @@ import sys
 import time
 from logs.api_logger import send_trade_log
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
@@ -18,8 +19,74 @@ from agent_core.llm.client import OpenRouterClient
 from data_engine.orchestrator import GoldTradingOrchestrator
 from database.database import RunDatabase
 from ui.core.services import init_services
+from data_engine.extract_features import get_xgboost_feature
+# ─────────────────────────────────────────────────────────────
+# xgboost
+# ─────────────────────────────────────────────────────────────
 
+def get_xgboost_signal(raw_data: dict) -> str:
+    """
+    รับข้อมูลดิบ (Raw Data) -> สกัด Features -> ตัดข้อมูลที่ไม่เกี่ยวข้องออก -> ส่งให้โมเดล XGBoost บน Hugging Face ประมวลผล
+    และรับค่ากลับมาเป็น 'BUY', 'SELL', หรือ 'HOLD'
+    """
+    # 1. สกัด Features ออกมาเป็น Dictionary ด้วยฟังก์ชันที่คุณเขียนไว้
+    features = get_xgboost_feature(raw_data, as_dataframe=False)
+    
+    # 2. นำตัวแปรกลุ่ม Forex ออกจาก Features เพื่อโฟกัสที่ข้อมูลทองคำโดยตรง
+    if "usd_thb" in features:
+        del features["usd_thb"]
 
+    # ดึงค่า API Config จากไฟล์ .env
+    hf_token = os.getenv("HF_TOKEN")
+    hf_api_url = os.getenv("HF_XGBOOST_URL") 
+
+    if not hf_token or not hf_api_url:
+        print("⚠️ [XGBoost] ข้ามการทำงาน: ไม่พบ HF_TOKEN หรือ HF_XGBOOST_URL ใน .env")
+        return "HOLD"
+
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json"
+    }
+
+    # จัดรูปแบบ Payload ตามที่ Hugging Face Inference API ต้องการ
+    payload = {
+        "inputs": features 
+    }
+
+    try:
+        # กำหนด Timeout สั้นๆ ไว้ที่ 10 วินาที เพื่อรักษาความเร็วในการออกไม้เทรด
+        response = requests.post(hf_api_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        signal = "HOLD"
+        # จัดการโครงสร้าง Response ที่อาจแตกต่างกันตามการตั้งค่าบน Hugging Face
+        if isinstance(result, list) and len(result) > 0:
+            if isinstance(result[0], dict):
+                signal = result[0].get("label", "HOLD")
+            else:
+                signal = str(result[0])
+        elif isinstance(result, dict):
+            signal = result.get("label", result.get("prediction", "HOLD"))
+            
+        signal = signal.upper()
+        
+        if signal in ["BUY", "SELL", "HOLD"]:
+            print(f"🌲 [XGBoost] ประมวลผลสำเร็จ ได้รับสัญญาณชี้เป้า: {signal}")
+            return signal
+        else:
+            print(f"⚠️ [XGBoost] สัญญาณที่ได้ไม่ตรงรูปแบบ (ได้ '{signal}'), ใช้ HOLD แทน")
+            return "HOLD"
+
+    except requests.exceptions.Timeout:
+        print("❌ [XGBoost] API Timeout: Hugging Face ตอบสนองช้าเกินไป ข้ามไปใช้ HOLD")
+        return "HOLD"
+    except Exception as e:
+        print(f"❌ [XGBoost] API Error: {e}")
+        return "HOLD"
+    
 # ─────────────────────────────────────────────────────────────
 # Print helpers  (เหมือน main.py ทุกอย่าง)
 # ─────────────────────────────────────────────────────────────
@@ -124,7 +191,7 @@ def build_runtime(*, no_save: bool = False) -> dict:
 
     orchestrator = GoldTradingOrchestrator()
     db = None if no_save else RunDatabase()
-    services = init_services(skill_registry, role_registry, orchestrator, db)
+    services = init_services(skill_registry, role_registry, orchestrator, db, xgb_fetcher=get_xgboost_signal)
 
     return {
         "skill_registry": skill_registry,

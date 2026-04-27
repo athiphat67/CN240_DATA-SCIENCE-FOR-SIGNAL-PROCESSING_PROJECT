@@ -4,15 +4,10 @@
       "name": "market_analysis",
       "description": "Comprehensive analysis of technical indicators (RSI, MACD, EMA) and news sentiment.",
       "tools": [
-        "detect_swing_low",
-        "detect_rsi_divergence",
-        "check_bb_rsi_combo",
-        "calculate_ema_distance",
         "get_htf_trend",
         "check_volatility",
         "get_deep_news_by_category",
-        "get_recent_indicators",
-        "check_bb_squeeze"
+        "get_recent_indicators"
       ],
       "constraints": {
         "max_calls_per_step": 3,
