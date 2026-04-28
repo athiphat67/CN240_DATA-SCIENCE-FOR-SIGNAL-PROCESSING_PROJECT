@@ -1,7 +1,13 @@
 import React from 'react';
-import { Download, Plus } from 'lucide-react';
+import { Download, Minus, Plus } from 'lucide-react';
 
-export const PortfolioHeader = () => {
+interface PortfolioHeaderProps {
+  onAddFunds: () => void;
+  onWithdrawFunds: () => void;
+  isSubmitting?: boolean;
+}
+
+export const PortfolioHeader = ({ onAddFunds, onWithdrawFunds, isSubmitting = false }: PortfolioHeaderProps) => {
   return (
     <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-8">
       <div>
@@ -14,8 +20,21 @@ export const PortfolioHeader = () => {
         <button className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-xl text-sm font-bold text-gray-700 shadow-sm hover:bg-gray-50 transition-all active:scale-95">
           <Download size={16} /> Statement
         </button>
-        <button className="flex items-center gap-2 px-4 py-2 bg-[#824199] text-white rounded-xl text-sm font-bold shadow-md hover:bg-[#6c3680] transition-all active:scale-95">
-          <Plus size={16} /> Add Funds
+        <button
+          type="button"
+          onClick={onWithdrawFunds}
+          disabled={isSubmitting}
+          className="flex items-center gap-2 px-4 py-2 bg-white text-[#824199] border border-[#824199]/20 rounded-xl text-sm font-bold shadow-sm hover:bg-purple-50 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          <Minus size={16} /> {isSubmitting ? 'Saving...' : 'Withdraw'}
+        </button>
+        <button
+          type="button"
+          onClick={onAddFunds}
+          disabled={isSubmitting}
+          className="flex items-center gap-2 px-4 py-2 bg-[#824199] text-white rounded-xl text-sm font-bold shadow-md hover:bg-[#6c3680] transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          <Plus size={16} /> {isSubmitting ? 'Saving...' : 'Add Funds'}
         </button>
       </div>
     </div>

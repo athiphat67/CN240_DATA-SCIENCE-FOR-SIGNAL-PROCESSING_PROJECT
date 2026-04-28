@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel   
 import argparse                  
 import sys
 import threading
+import importlib.util
 try:
     from cachetools import TTLCache
     _HAS_CACHETOOLS = True
@@ -43,7 +44,22 @@ dotenv_path = os.path.join(project_root, '.env')
 
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-import main as agent_cli # Import ไฟล์ main.py หลักของคุณมาใช้งาน
+
+
+def _load_agent_cli():
+    """โหลด Src/main.py ภายใต้ชื่อ module เฉพาะ เพื่อเลี่ยง circular import กับ uvicorn."""
+    agent_main_path = os.path.join(project_root, "main.py")
+    spec = importlib.util.spec_from_file_location("agent_cli_main", agent_main_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load agent main module from {agent_main_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["agent_cli_main"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+agent_cli = _load_agent_cli()  # Import ไฟล์ main.py หลักของคุณมาใช้งาน
 # --------------------------------------------------------------------
 
 # 2. โหลดด้วย path ที่ระบุ
@@ -109,6 +125,43 @@ def _cache_set(key: str, value):
     with _cache_lock:
         _cache[key]["v"] = value
 
+
+def _cache_invalidate(*keys: str):
+    """ล้าง cache เฉพาะ key ที่เกี่ยวข้องหลังมีการแก้ข้อมูล"""
+    with _cache_lock:
+        for key in keys:
+            cache_bucket = _cache.get(key)
+            if cache_bucket is not None:
+                cache_bucket.clear()
+
+
+def _build_portfolio_payload(result: dict) -> dict:
+    cost_basis = float(result.get('cost_basis_thb') or 0.0)
+    gold_grams = float(result.get('gold_grams') or 0.0)
+    unrealized_pnl = float(result.get('unrealized_pnl') or 0.0)
+    available_cash = float(result.get('cash_balance', 0))
+
+    total_cost = cost_basis * gold_grams
+    pnl_percent = round((unrealized_pnl / total_cost) * 100, 2) if total_cost > 0 else 0.0
+    total_equity = available_cash + total_cost + unrealized_pnl
+
+    return {
+        "available_cash": available_cash,
+        "cash_balance": available_cash,
+        "gold_grams": gold_grams,
+        "cost_basis_thb": cost_basis,
+        "current_value_thb": float(result.get('current_value_thb') or 0.0),
+        "unrealized_pnl": unrealized_pnl,
+        "pnl_percent": pnl_percent,
+        "trades_today": int(result.get('trades_today', 0)),
+        "total_equity": total_equity,
+        "updated_at": result.get("updated_at") or "",
+        "trailing_stop_level_thb": (
+            round(float(result.get("trailing_stop_level_thb")), 4)
+            if result.get("trailing_stop_level_thb") is not None else None
+        ),
+    }
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 # [🔥 ส่วนที่ต้องเพิ่มใหม่] โหลด Runtime ของ AI Agent เตรียมไว้ตอนเปิด Server
@@ -125,7 +178,8 @@ class AnalyzeRequest(BaseModel):
     provider: str
     period: str = "7d"
     intervals: list[str] = ["15m"]
-    
+
+
 @app.post("/api/analyze")
 def trigger_analysis(req: AnalyzeRequest): # ✅ ลบ async ออกแล้ว (เหลือแค่ def)
     args = argparse.Namespace(
@@ -198,27 +252,102 @@ def get_portfolio_data():
         return cached
     try:
         result = db.get_portfolio()
-        
-        cost_basis = float(result.get('cost_basis_thb') or 0.0)
-        gold_grams = float(result.get('gold_grams') or 0.0)
-        unrealized_pnl = float(result.get('unrealized_pnl') or 0.0)
-        available_cash = float(result.get('cash_balance', 0))
-        
-        total_cost = cost_basis * gold_grams
-        pnl_percent = round((unrealized_pnl / total_cost) * 100, 2) if total_cost > 0 else 0.0
-        
-        # คำนวณ Total Equity ส่งไปให้ Frontend
-        total_equity = available_cash + total_cost + unrealized_pnl
-
-        payload = {
-            "available_cash": available_cash,
-            "unrealized_pnl": unrealized_pnl,
-            "pnl_percent": pnl_percent,
-            "trades_today": int(result.get('trades_today', 0)),
-            "total_equity": total_equity
-        }
+        payload = _build_portfolio_payload(result)
         _cache_set("portfolio", payload)
         return payload
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/portfolio/add-funds")
+def add_portfolio_funds(amount: float = Query(...)):
+    amount = float(amount or 0)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+
+    try:
+        portfolio = db.get_portfolio()
+        portfolio["cash_balance"] = round(float(portfolio.get("cash_balance", 0.0)) + amount, 2)
+        db.save_portfolio(portfolio)
+
+        payload = _build_portfolio_payload(portfolio)
+        _cache_invalidate("portfolio", "history_summary", "notifications")
+        _cache_set("portfolio", payload)
+        return payload
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/portfolio/withdraw-funds")
+def withdraw_portfolio_funds(amount: float = Query(...)):
+    amount = float(amount or 0)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+
+    try:
+        portfolio = db.get_portfolio()
+        available_cash = round(float(portfolio.get("cash_balance", 0.0)), 2)
+        if amount > available_cash:
+            raise HTTPException(status_code=400, detail="Withdrawal amount exceeds available cash balance")
+
+        portfolio["cash_balance"] = round(available_cash - amount, 2)
+        db.save_portfolio(portfolio)
+
+        payload = _build_portfolio_payload(portfolio)
+        _cache_invalidate("portfolio", "history_summary", "notifications")
+        _cache_set("portfolio", payload)
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/portfolio/manual-update")
+def manual_update_portfolio(
+    cash_balance: float | None = Query(None),
+    gold_grams: float | None = Query(None),
+    cost_basis_thb: float | None = Query(None),
+    current_value_thb: float | None = Query(None),
+    unrealized_pnl: float | None = Query(None),
+    trades_today: int | None = Query(None),
+    trailing_stop_level_thb: float | None = Query(None),
+):
+    updates = {
+        "cash_balance": cash_balance,
+        "gold_grams": gold_grams,
+        "cost_basis_thb": cost_basis_thb,
+        "current_value_thb": current_value_thb,
+        "unrealized_pnl": unrealized_pnl,
+        "trades_today": trades_today,
+        "trailing_stop_level_thb": trailing_stop_level_thb,
+    }
+    if all(value is None for value in updates.values()):
+        raise HTTPException(status_code=400, detail="At least one portfolio field must be provided")
+
+    try:
+        portfolio = db.get_portfolio()
+
+        for key, value in updates.items():
+            if value is None:
+                continue
+            if key == "trades_today":
+                if int(value) < 0:
+                    raise HTTPException(status_code=400, detail="trades_today cannot be negative")
+                portfolio[key] = int(value)
+            else:
+                if key in {"cash_balance", "gold_grams", "current_value_thb"} and float(value) < 0:
+                    raise HTTPException(status_code=400, detail=f"{key} cannot be negative")
+                portfolio[key] = float(value)
+
+        db.save_portfolio(portfolio)
+
+        payload = _build_portfolio_payload(portfolio)
+        _cache_invalidate("portfolio", "history_summary", "notifications")
+        _cache_set("portfolio", payload)
+        return payload
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     

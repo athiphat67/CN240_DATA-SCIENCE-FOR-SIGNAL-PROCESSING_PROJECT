@@ -143,7 +143,7 @@ _HISTORY_COLS = """
 # FIX: whitelist สำหรับ migration — ป้องกัน f-string injection ถ้า migrations list
 #      เคยถูกย้ายมาจาก config ภายนอกในอนาคต
 _ALLOWED_MIGRATION_TABLES = {"runs", "portfolio", "llm_logs"}
-_ALLOWED_MIGRATION_TYPES  = {"REAL", "INTEGER", "TEXT", "BOOLEAN"}
+_ALLOWED_MIGRATION_TYPES = {"REAL", "INTEGER", "TEXT", "BOOLEAN"}
 
 
 class RunDatabase:
@@ -161,6 +161,7 @@ class RunDatabase:
             maxconn=5,
             dsn=self.db_url,
             cursor_factory=RealDictCursor,
+            sslmode="require",
         )
         sys_logger.info("DB connection pool initialized (min=1, max=5)")
         self._init_db()
@@ -193,17 +194,17 @@ class RunDatabase:
 
                 # ── Idempotent column migrations ───────────────────────────
                 migrations = [
-                    ("runs", "entry_price_thb",  "REAL"),
-                    ("runs", "stop_loss_thb",    "REAL"),
-                    ("runs", "take_profit_thb",  "REAL"),
-                    ("runs", "usd_thb_rate",     "REAL"),
-                    ("runs", "gold_price_thb",   "REAL"),
+                    ("runs", "entry_price_thb", "REAL"),
+                    ("runs", "stop_loss_thb", "REAL"),
+                    ("runs", "take_profit_thb", "REAL"),
+                    ("runs", "usd_thb_rate", "REAL"),
+                    ("runs", "gold_price_thb", "REAL"),
                     # ── v3.4: data quality & indicators ───────────────────
-                    ("runs", "is_weekend",       "BOOLEAN"),
-                    ("runs", "data_quality",     "TEXT"),
-                    ("runs", "macd_histogram",   "REAL"),
-                    ("runs", "bb_pct_b",         "REAL"),
-                    ("runs", "atr_thb",          "REAL"),
+                    ("runs", "is_weekend", "BOOLEAN"),
+                    ("runs", "data_quality", "TEXT"),
+                    ("runs", "macd_histogram", "REAL"),
+                    ("runs", "bb_pct_b", "REAL"),
+                    ("runs", "atr_thb", "REAL"),
                     ("portfolio", "trailing_stop_level_thb", "REAL"),
                 ]
                 for table, col, typ in migrations:
@@ -241,8 +242,8 @@ class RunDatabase:
             f"save_run START — provider={provider}, interval={interval_tf}, period={period}"
         )
 
-        signal_val    = result.get("signal", "HOLD")
-        conf_val      = result.get("confidence", 0.0)
+        signal_val = result.get("signal", "HOLD")
+        conf_val = result.get("confidence", 0.0)
         rationale_val = result.get("rationale", "")
         if not rationale_val:
             breakdown = result.get("voting_breakdown", {})
@@ -254,25 +255,25 @@ class RunDatabase:
         dq = market_state.get("data_quality", {})
 
         gold_price_usd = md.get("spot_price_usd", {}).get("price_usd_per_oz")
-        usd_thb        = md.get("forex", {}).get("usd_thb")
+        usd_thb = md.get("forex", {}).get("usd_thb")
         gold_price_thb = md.get("thai_gold_thb", {}).get("sell_price_thb")
 
-        rsi_val     = ti.get("rsi", {}).get("value")
-        macd_line   = ti.get("macd", {}).get("macd_line")
+        rsi_val = ti.get("rsi", {}).get("value")
+        macd_line = ti.get("macd", {}).get("macd_line")
         signal_line = ti.get("macd", {}).get("signal_line")
-        trend_dir   = ti.get("trend", {}).get("trend")
+        trend_dir = ti.get("trend", {}).get("trend")
 
         # ── v3.4: new fields ──────────────────────────────────────────────
         macd_histogram = ti.get("macd", {}).get("histogram")
-        bb_pct_b       = ti.get("bollinger", {}).get("pct_b")
-        atr_thb        = ti.get("atr", {}).get("value")   # Gate-3 ได้ convert เป็น THB แล้ว
-        is_weekend     = bool(dq.get("is_weekend", False))
-        data_quality   = dq.get("quality_score", "unknown")
+        bb_pct_b = ti.get("bollinger", {}).get("pct_b")
+        atr_thb = ti.get("atr", {}).get("value")  # Gate-3 ได้ convert เป็น THB แล้ว
+        is_weekend = bool(dq.get("is_weekend", False))
+        data_quality = dq.get("quality_score", "unknown")
 
         # ─── ราคา THB/gram จาก LLM โดยตรง (ไม่แปลง) ──────────────────────
-        entry_thb = result.get("entry_price")   # THB/gram
-        stop_thb  = result.get("stop_loss")      # THB/gram
-        take_thb  = result.get("take_profit")    # THB/gram
+        entry_thb = result.get("entry_price")  # THB/gram
+        stop_thb = result.get("stop_loss")  # THB/gram
+        take_thb = result.get("take_profit")  # THB/gram
 
         query = """
             INSERT INTO runs (
@@ -301,22 +302,38 @@ class RunDatabase:
         """
         values = (
             datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            provider, interval_tf, period,
-            signal_val, conf_val,
-            entry_thb, stop_thb, take_thb,
-            entry_thb, stop_thb, take_thb,   # _thb aliases
-            usd_thb, gold_price_thb,
+            provider,
+            interval_tf,
+            period,
+            signal_val,
+            conf_val,
+            entry_thb,
+            stop_thb,
+            take_thb,
+            entry_thb,
+            stop_thb,
+            take_thb,  # _thb aliases
+            usd_thb,
+            gold_price_thb,
             rationale_val,
             result.get("iterations_used", 0),
             result.get("tool_calls_used", 0),
-            gold_price_usd, rsi_val, macd_line, signal_line, trend_dir,
+            gold_price_usd,
+            rsi_val,
+            macd_line,
+            signal_line,
+            trend_dir,
             json.dumps(result.get("react_trace", []), ensure_ascii=False),
             json.dumps(
                 {"market_data": md, "technical_indicators": ti},
-                ensure_ascii=False, default=str,
+                ensure_ascii=False,
+                default=str,
             ),
-            is_weekend, data_quality,
-            macd_histogram, bb_pct_b, atr_thb,
+            is_weekend,
+            data_quality,
+            macd_histogram,
+            bb_pct_b,
+            atr_thb,
         )
 
         # FIX: wrap DB write ด้วย try/except — log payload ที่ fail แล้ว re-raise
@@ -388,17 +405,21 @@ class RunDatabase:
 
         if not row:
             return {
-                "total": 0, "buy_count": 0, "sell_count": 0,
-                "hold_count": 0, "avg_confidence": 0.0, "avg_price": 0.0,
+                "total": 0,
+                "buy_count": 0,
+                "sell_count": 0,
+                "hold_count": 0,
+                "avg_confidence": 0.0,
+                "avg_price": 0.0,
             }
 
         return {
-            "total":          row["total"] or 0,
-            "buy_count":      row["buy_count"] or 0,
-            "sell_count":     row["sell_count"] or 0,
-            "hold_count":     row["hold_count"] or 0,
+            "total": row["total"] or 0,
+            "buy_count": row["buy_count"] or 0,
+            "sell_count": row["sell_count"] or 0,
+            "hold_count": row["hold_count"] or 0,
             "avg_confidence": round(row["avg_confidence"] or 0, 3),
-            "avg_price":      round(row["avg_price"] or 0, 2),  # THB/gram
+            "avg_price": round(row["avg_price"] or 0, 2),  # THB/gram
         }
 
     def delete_run(self, run_id: int) -> bool:
@@ -505,7 +526,7 @@ class RunDatabase:
         if not logs:
             return []
 
-        ids    = []
+        ids = []
         errors = []
         for log_data in logs:
             try:
@@ -591,8 +612,9 @@ class RunDatabase:
         )
         query = """
             INSERT INTO portfolio (id, cash_balance, gold_grams, cost_basis_thb,
-                                   current_value_thb, unrealized_pnl, trades_today, updated_at)
-            VALUES (1, %s, %s, %s, %s, %s, %s, %s)
+                                   current_value_thb, unrealized_pnl, trades_today, updated_at,
+                                   trailing_stop_level_thb)
+            VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 cash_balance      = EXCLUDED.cash_balance,
                 gold_grams        = EXCLUDED.gold_grams,
@@ -600,7 +622,8 @@ class RunDatabase:
                 current_value_thb = EXCLUDED.current_value_thb,
                 unrealized_pnl    = EXCLUDED.unrealized_pnl,
                 trades_today      = EXCLUDED.trades_today,
-                updated_at        = EXCLUDED.updated_at;
+                updated_at        = EXCLUDED.updated_at,
+                trailing_stop_level_thb = EXCLUDED.trailing_stop_level_thb;
         """
         values = (
             data.get("cash_balance", 1500.0),
@@ -610,6 +633,7 @@ class RunDatabase:
             data.get("unrealized_pnl", 0.0),
             data.get("trades_today", 0),
             datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            data.get("trailing_stop_level_thb"),
         )
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -619,13 +643,14 @@ class RunDatabase:
     def get_portfolio(self) -> dict:
         """ดึง portfolio row (id=1) ถ้าไม่มีคืน default"""
         default = {
-            "cash_balance":      1500.0,
-            "gold_grams":        0.0,
-            "cost_basis_thb":    0.0,
+            "cash_balance": 1500.0,
+            "gold_grams": 0.0,
+            "cost_basis_thb": 0.0,
             "current_value_thb": 0.0,
-            "unrealized_pnl":    0.0,
-            "trades_today":      0,
-            "updated_at":        "",
+            "unrealized_pnl": 0.0,
+            "trades_today": 0,
+            "updated_at": "",
+            "trailing_stop_level_thb": None,
         }
         try:
             with self.get_connection() as conn:
@@ -661,7 +686,9 @@ class RunDatabase:
         """
         action = trade.get("action", "").upper()
         if action not in ("BUY", "SELL"):
-            raise ValueError(f"save_trade: invalid action '{action}' — must be BUY or SELL")
+            raise ValueError(
+                f"save_trade: invalid action '{action}' — must be BUY or SELL"
+            )
 
         query = """
             INSERT INTO trade_log (
@@ -691,8 +718,8 @@ class RunDatabase:
             trade.get("gold_before"),
             trade.get("gold_after"),
             trade.get("cost_basis_thb"),
-            trade.get("pnl_thb"),     # None สำหรับ BUY
-            trade.get("pnl_pct"),     # None สำหรับ BUY
+            trade.get("pnl_thb"),  # None สำหรับ BUY
+            trade.get("pnl_pct"),  # None สำหรับ BUY
             trade.get("note"),
         )
 
@@ -702,14 +729,17 @@ class RunDatabase:
                 new_id = cursor.fetchone()["id"]
             conn.commit()
 
-        pnl_str = f" | PnL={trade.get('pnl_thb'):+.2f} THB" if trade.get("pnl_thb") is not None else ""
+        pnl_str = (
+            f" | PnL={trade.get('pnl_thb'):+.2f} THB"
+            if trade.get("pnl_thb") is not None
+            else ""
+        )
         sys_logger.info(
             f"save_trade OK — id={new_id} {action} {trade.get('gold_grams')}g "
             f"@ {trade.get('price_thb')} THB/g{pnl_str}"
         )
         return new_id
 
- 
     def record_emergency_sell_atomic(
         self,
         grams: float,
@@ -723,40 +753,39 @@ class RunDatabase:
         รวม 2 operations ใน transaction เดียว:
           1. INSERT INTO trade_log (action=SELL)
           2. UPDATE portfolio (gold_grams, cost_basis, unrealized_pnl)
- 
+
         ป้องกัน Phantom Gold: ถ้า step ใด fail → rollback ทั้งคู่ ไม่มีข้อมูลครึ่งๆ
- 
+
         Returns:
             trade_log.id ที่เพิ่งสร้าง
         """
         from datetime import datetime
- 
+
         portfolio = self.get_portfolio()
- 
-        gold_before  = float(portfolio.get("gold_grams",     0.0))
-        cash_before  = float(portfolio.get("cash_balance",   0.0))
-        cost_basis   = float(portfolio.get("cost_basis_thb", 0.0))
- 
+
+        gold_before = float(portfolio.get("gold_grams", 0.0))
+        cash_before = float(portfolio.get("cash_balance", 0.0))
+        cost_basis = float(portfolio.get("cost_basis_thb", 0.0))
+
         if gold_before <= 0:
             raise ValueError(
                 f"record_emergency_sell_atomic: gold_grams={gold_before} — nothing to sell"
             )
- 
+
         grams_to_sell = min(grams, gold_before)  # ขายได้ไม่เกินที่มี
-        amount_thb    = grams_to_sell * price_per_gram
-        gold_after    = round(gold_before - grams_to_sell, 6)
-        cash_after    = round(cash_before + amount_thb, 2)
- 
+        amount_thb = grams_to_sell * price_per_gram
+        gold_after = round(gold_before - grams_to_sell, 6)
+        cash_after = round(cash_before + amount_thb, 2)
+
         # PnL = (sell price - cost basis) × grams ขาย
         pnl_thb = (price_per_gram - cost_basis) * grams_to_sell
         pnl_pct = (pnl_thb / (cost_basis * grams_to_sell)) if cost_basis > 0 else 0.0
- 
+
         now_str = datetime.utcnow().isoformat(timespec="seconds") + "Z"
- 
+
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
- 
                     # ── Step 1: INSERT trade_log ──────────────────────
                     cursor.execute(
                         """
@@ -776,11 +805,16 @@ class RunDatabase:
                         RETURNING id;
                         """,
                         (
-                            run_id, "SELL", now_str,
-                            round(price_per_gram, 4), round(grams_to_sell, 6),
+                            run_id,
+                            "SELL",
+                            now_str,
+                            round(price_per_gram, 4),
+                            round(grams_to_sell, 6),
                             round(amount_thb, 2),
-                            round(cash_before, 2), cash_after,
-                            round(gold_before, 6), gold_after,
+                            round(cash_before, 2),
+                            cash_after,
+                            round(gold_before, 6),
+                            gold_after,
                             round(cost_basis, 4),
                             round(pnl_thb, 2),
                             round(pnl_pct, 6),
@@ -788,7 +822,7 @@ class RunDatabase:
                         ),
                     )
                     trade_id = cursor.fetchone()["id"]
- 
+
                     # ── Step 2: UPDATE portfolio (UPSERT id=1) ────────
                     new_cost_basis = cost_basis if gold_after > 0 else 0.0
                     cursor.execute(
@@ -815,32 +849,36 @@ class RunDatabase:
                             cash_after,
                             gold_after,
                             new_cost_basis,
-                            round(gold_after * price_per_gram, 2),   # current_value_thb
-                            round(gold_after * (price_per_gram - cost_basis), 2),  # unrealized_pnl
+                            round(gold_after * price_per_gram, 2),  # current_value_thb
+                            round(
+                                gold_after * (price_per_gram - cost_basis), 2
+                            ),  # unrealized_pnl
                             now_str,
                         ),
                     )
- 
+
                 # ── Commit: ทั้ง trade_log + portfolio ใน transaction เดียว ──
                 conn.commit()
- 
+
         except Exception as e:
             # rollback เกิดขึ้นอัตโนมัติจาก get_connection() context manager
             from logs.logger_setup import sys_logger
+
             sys_logger.error(
                 f"record_emergency_sell_atomic FAILED — ROLLBACK | "
                 f"grams={grams_to_sell} price={price_per_gram} reason={reason} | err={e}"
             )
             raise
- 
+
         from logs.logger_setup import sys_logger
+
         sys_logger.info(
             f"record_emergency_sell_atomic OK — trade_id={trade_id} "
             f"SELL {grams_to_sell:.4f}g @ {price_per_gram:.2f} ฿/g "
             f"PnL={pnl_thb:+.2f} THB ({pnl_pct:+.2%})"
         )
         return trade_id
- 
+
     def clear_trailing_stop(self) -> None:
         """
         Reset trailing_stop_level_thb = NULL ใน portfolio
@@ -852,7 +890,7 @@ class RunDatabase:
                     "UPDATE portfolio SET trailing_stop_level_thb = NULL WHERE id = 1"
                 )
             conn.commit()
-    
+
     def get_trade_history(self, limit: int = 100) -> list[dict]:
         """ดึง trade history ทั้งหมด เรียงจากใหม่ไปเก่า"""
         with self.get_connection() as conn:
@@ -894,24 +932,29 @@ class RunDatabase:
 
         if not row:
             return {
-                "total_trades": 0, "buy_count": 0, "sell_count": 0,
-                "total_pnl_thb": 0.0, "avg_pnl_pct": 0.0,
-                "win_count": 0, "loss_count": 0, "win_rate": 0.0,
+                "total_trades": 0,
+                "buy_count": 0,
+                "sell_count": 0,
+                "total_pnl_thb": 0.0,
+                "avg_pnl_pct": 0.0,
+                "win_count": 0,
+                "loss_count": 0,
+                "win_rate": 0.0,
             }
 
         sell_count = row["sell_count"] or 0
-        win_count  = row["win_count"] or 0
+        win_count = row["win_count"] or 0
         return {
-            "total_trades":  row["total_trades"] or 0,
-            "buy_count":     row["buy_count"] or 0,
-            "sell_count":    sell_count,
+            "total_trades": row["total_trades"] or 0,
+            "buy_count": row["buy_count"] or 0,
+            "sell_count": sell_count,
             "total_pnl_thb": round(row["total_pnl_thb"] or 0, 2),
-            "avg_pnl_pct":   round(row["avg_pnl_pct"] or 0, 4),
-            "win_count":     win_count,
-            "loss_count":    row["loss_count"] or 0,
-            "win_rate":      round(win_count / sell_count, 3) if sell_count > 0 else 0.0,
+            "avg_pnl_pct": round(row["avg_pnl_pct"] or 0, 4),
+            "win_count": win_count,
+            "loss_count": row["loss_count"] or 0,
+            "win_rate": round(win_count / sell_count, 3) if sell_count > 0 else 0.0,
         }
-    
+
     def get_monthly_growth(self) -> dict:
         """
         คำนวณ Growth P&L เทียบเดือนปัจจุบันกับเดือนที่แล้ว
@@ -949,18 +992,19 @@ class RunDatabase:
             elif curr > 0 and last <= 0:
                 growth_pct = 100.0  # โตจาก 0 ถือว่าเป็น 100%
             elif curr < 0 and last <= 0:
-                growth_pct = -100.0 # ติดลบเพิ่มขึ้น
+                growth_pct = -100.0  # ติดลบเพิ่มขึ้น
             else:
                 growth_pct = 0.0
 
             return {
                 "current_month_thb": round(curr, 2),
                 "last_month_thb": round(last, 2),
-                "growth_pct": round(growth_pct, 2)
+                "growth_pct": round(growth_pct, 2),
             }
-            
+
         except Exception as e:
             from logs.logger_setup import sys_logger
+
             sys_logger.error(f"get_monthly_growth FAILED: {e}")
             return {"current_month_thb": 0.0, "last_month_thb": 0.0, "growth_pct": 0.0}
 
@@ -973,7 +1017,8 @@ class RunDatabase:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
                     # ใช้ Window Function ของ PostgreSQL บวกสะสม (Cumulative Sum)
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         WITH daily_pnl AS (
                             SELECT 
                                 date_trunc('day', executed_at::timestamp) as day_date,
@@ -988,7 +1033,9 @@ class RunDatabase:
                             SUM(daily_profit) OVER (ORDER BY day_date ASC) as cumulative_profit
                         FROM daily_pnl
                         ORDER BY day_date ASC;
-                    """, (days,))
+                    """,
+                        (days,),
+                    )
                     rows = cursor.fetchall()
 
             if not rows:
@@ -998,12 +1045,13 @@ class RunDatabase:
             return [
                 {
                     "date": r["display_date"],
-                    "profit": round(float(r["cumulative_profit"]), 2)
+                    "profit": round(float(r["cumulative_profit"]), 2),
                 }
                 for r in rows
             ]
 
         except Exception as e:
             from logs.logger_setup import sys_logger
+
             sys_logger.error(f"get_daily_cumulative_pnl FAILED: {e}")
             return []

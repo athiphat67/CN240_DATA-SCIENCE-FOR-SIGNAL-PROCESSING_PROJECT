@@ -1,7 +1,9 @@
 import json
 import logging
+import time
 from pathlib import Path
 import pandas as pd
+import requests
 from data_engine.tools.tool_registry import call_tool
 from data_engine.tools.schema_validator import validate_market_state
 from data_engine.tools.interceptor_manager import start_interceptor_background
@@ -27,6 +29,55 @@ class GoldTradingOrchestrator:
         self.max_news_per_cat = max_news_per_cat
         self.output_dir = Path(output_dir) if output_dir else Path("./output")
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _fetch_mts_latest_price(self):
+        """
+        Fetch the latest 1-minute close price for GLD965 from the MTS Gold
+        TradingView UDF history endpoint.
+
+        Returns:
+            float | None: Latest close price in THB, or None if the market is
+            closed (status "no_data") or any error occurs.
+        """
+        end_ts = int(time.time())
+        start_ts = end_ts - 3600  # 1 hour window to guarantee >=1 candle
+
+        url = (
+            "https://tradingview.mtsgold.co.th/mgb/history"
+            f"?symbol=GLD965&resolution=1&from={start_ts}&to={end_ts}"
+            "&countback=1&currencyCode=THB"
+        )
+
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            payload = resp.json()
+        except requests.exceptions.RequestException as e:
+            logger.error("MTS latest price HTTP error: %s", e)
+            return None
+        except ValueError as e:
+            logger.error("MTS latest price JSON decode error: %s", e)
+            return None
+
+        status = payload.get("s")
+
+        if status == "ok":
+            closes = payload.get("c") or []
+            if not closes:
+                logger.warning("MTS response status 'ok' but 'c' array is empty.")
+                return None
+            try:
+                return float(closes[-1])
+            except (TypeError, ValueError) as e:
+                logger.error("MTS latest price could not cast close to float: %s", e)
+                return None
+
+        if status == "no_data":
+            logger.warning("MTS returned 'no_data' — market likely closed.")
+            return None
+
+        logger.error("MTS latest price unexpected status '%s': %s", status, payload)
+        return None
 
     def run(self, save_to_file=True, history_days=None, interval=None, recent_trades=None) -> dict:
         effective_days = history_days or self.history_days
@@ -186,6 +237,19 @@ class GoldTradingOrchestrator:
         # if trend_d and "trend_signal" not in trend_d:
         #     trend_d["trend_signal"] = trend_d.get("trend", "neutral")
         # TODO: trend_signal reserved for future multi-signal aggregation
+
+        # ── Primary price source: MTS API → fallback to Interceptor ────────────
+        mts_price = self._fetch_mts_latest_price()
+        if mts_price is not None:
+            thai["sell_price_thb"] = float(mts_price)
+            dq["source"] = "MTS_API"
+            logger.info(f"[Orchestrator] Primary price source: MTS_API ({mts_price})")
+        else:
+            dq["source"] = "INTERCEPTOR_FALLBACK"
+            logger.warning(
+                "[Orchestrator] MTS API returned None — falling back to "
+                f"Interceptor price ({thai.get('sell_price_thb')})"
+            )
 
         # ── thai_gold_thb: เพิ่ม mid_price + timestamp ─────────────────────────
         sell = thai.get("sell_price_thb", 0)

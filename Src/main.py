@@ -342,33 +342,33 @@ def main():
 
     # ── WatcherEngine: สร้างครั้งเดียวก่อน loop ─────────────────────────
     # (import ที่นี่เพื่อไม่ให้ crash ถ้า engine ยังไม่มี — graceful fallback)
-    # _watcher = None
-    # try:
-    #     from engine.engine import WatcherEngine
+    _watcher = None
+    try:
+         from engine.engine import WatcherEngine
 
-    #     # สร้าง orchestrator + db ชั่วคราวสำหรับ watcher init
-    #     # (watcher ใช้ analysis_service ที่สร้างใน loop แรก ไม่ได้ ต้องสร้างก่อน)
-    #     _w_skill = SkillRegistry()
-    #     _w_skill.load_from_json(os.path.join(current_dir, "agent_core", "config", "skills.json"))
-    #     _w_role  = RoleRegistry(_w_skill)
-    #     _w_role.load_from_json(os.path.join(current_dir, "agent_core", "config", "roles.json"))
-    #     _w_orch  = GoldTradingOrchestrator()
-    #     _w_db    = RunDatabase()
-    #     _w_svc   = init_services(_w_skill, _w_role, _w_orch, _w_db)
+         # สร้าง orchestrator + db ชั่วคราวสำหรับ watcher init
+         # (watcher ใช้ analysis_service ที่สร้างใน loop แรก ไม่ได้ ต้องสร้างก่อน)
+         _w_skill = SkillRegistry()
+         _w_skill.load_from_json(os.path.join(current_dir, "agent_core", "config", "skills.json"))
+         _w_role  = RoleRegistry(_w_skill)
+         _w_role.load_from_json(os.path.join(current_dir, "agent_core", "config", "roles.json"))
+         _w_orch  = GoldTradingOrchestrator()
+         _w_db    = RunDatabase()
+         _w_svc   = init_services(_w_skill, _w_role, _w_orch, _w_db)
 
-    #     _watcher = WatcherEngine(
-    #         analysis_service  = _w_svc["analysis"],
-    #         data_orchestrator = _w_orch,
-    #         watcher_config    = {
-    #             "provider":  args.provider,
-    #             "period":    args.period,
-    #             "interval":  '5m',
-    #         },
-    #     )
-    #     _watcher.start()
-    #     print("🔭 WatcherEngine started (background thread)")
-    # except Exception as _we:
-    #     print(f"⚠️  WatcherEngine not started: {_we}")
+         _watcher = WatcherEngine(
+             analysis_service  = _w_svc["analysis"],
+             data_orchestrator = _w_orch,
+             watcher_config    = {
+                 "provider":  args.provider,
+                 "period":    args.period,
+                 "interval":  '5m',
+             },
+         )
+         _watcher.start()
+         print("🔭 WatcherEngine started (background thread)")
+    except Exception as _we:
+         print(f"⚠️  WatcherEngine not started: {_we}")
 
     while True:
         try:
