@@ -277,7 +277,7 @@ class GeminiClient(LLMClient):
         full_prompt = self._build_prompt_text(prompt_package)
 
         try:
-            llm_logger.info(f"--- LLM REQUEST [{prompt_package.step_label}] ---")
+            # llm_logger.info(f"--- LLM REQUEST [{prompt_package.step_label}] ---")
             llm_logger.debug(f"PROMPT:\n{full_prompt}")
 
             response = self._client.models.generate_content(
@@ -294,7 +294,7 @@ class GeminiClient(LLMClient):
             token_output = getattr(usage, "candidates_token_count", 0) if usage else 0
             token_total  = getattr(usage, "total_token_count", token_input + token_output) if usage else token_input + token_output
 
-            llm_logger.info(f"--- LLM RESPONSE [{prompt_package.step_label}] ---")
+            # llm_logger.info(f"--- LLM RESPONSE [{prompt_package.step_label}] ---")
             llm_logger.info(f"🪙 Gemini Token Usage → Input: {token_input} | Output: {token_output} | Total: {token_total}")
             llm_logger.debug(f"OUTPUT:\n{text}")
 
@@ -953,6 +953,9 @@ class OpenRouterClient(LLMClient):
                 f"🪙 OpenRouter [{self.model}] Token Usage → "
                 f"Input: {token_input} | Output: {token_output} | Total: {token_total}"
             )
+            
+            llm_logger.info(f"🪙 Gemini Token Usage → Input: {token_input} | Output: {token_output} | Total: {token_total}")
+            llm_logger.debug(f"OUTPUT:\n{text}")
 
             # คืนค่า Response (ถ้า LLMResponse ของคุณรองรับ reasoning_text แล้ว ก็ส่งกลับไปได้เลย)
             response_kwargs = {

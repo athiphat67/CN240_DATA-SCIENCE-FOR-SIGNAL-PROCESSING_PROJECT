@@ -80,14 +80,11 @@ def _coerce_datetime(value) -> Optional[datetime]:
 
 
 # ── Helper functions for annualized metrics, XIRR, etc. ──────────────────────────
-def _safe_days_held(trade) -> Optional[int]:
-    for attr in ("days_held", "holding_days"):
-        v = getattr(trade, attr, None)
-        if v is not None:
-            try:
-                return max(int(v), 1)
-            except Exception:
-                pass
+def _safe_days_held(trade) -> Optional[float]:
+    """
+    [FIX] เปลี่ยนมาใช้ Fractional Days (ทศนิยม) แทนการปัดเป็น 1 วัน
+    เพื่อให้คำนวณระยะเวลาถือครอง (Holding Period) ของ Day Trade ได้แม่นยำ
+    """
     buy_dt = (
         getattr(trade, "buy_date", None)
         or getattr(trade, "entry_date", None)
@@ -102,8 +99,9 @@ def _safe_days_held(trade) -> Optional[int]:
     sell_dt = _coerce_datetime(sell_dt)
     if buy_dt and sell_dt:
         try:
-            # ใช้ inclusive day-count ให้ตรงกับ sample sheet (buy/sell same day = 1)
-            return max((sell_dt - buy_dt).days + 1, 1)
+            # ใช้ total_seconds เพื่อหาเศษของวัน (เช่น 15 นาที = 0.0104 วัน)
+            seconds = (sell_dt - buy_dt).total_seconds()
+            return max(seconds / 86400.0, 0.0001) # ป้องกันหาร 0
         except Exception:
             return None
     return None
@@ -147,15 +145,19 @@ def _xnpv(rate, cashflows):
     t0 = cashflows[0][0]
     total = 0.0
     for d, amt in cashflows:
-        days = (d - t0).days / 365.0
-        total += amt / ((1.0 + rate) ** days)
+        # [FIX] ใช้ total_seconds เพื่อความแม่นยำระดับวินาที
+        days = (d - t0).total_seconds() / 86400.0 / 365.0
+        try:
+            total += amt / ((1.0 + rate) ** days)
+        except OverflowError:
+            return float('inf') if amt > 0 else float('-inf')
     return total
 
 
 def _xirr(cashflows):
     if len(cashflows) < 2:
         return 0.0
-    amounts = [a for _, a in cashflows]
+    amounts =[a for _, a in cashflows]
     if not (any(a < 0 for a in amounts) and any(a > 0 for a in amounts)):
         return 0.0
     low, high = -0.9999, 1.0
@@ -189,21 +191,6 @@ def _xirr(cashflows):
 def calculate_trade_metrics(closed_trades) -> dict:
     """
     คำนวณ trade-based metrics จาก List[ClosedTrade]
-
-    Parameters
-    ----------
-    closed_trades : list ของ ClosedTrade objects จาก SimPortfolio.closed_trades
-
-    Returns
-    -------
-    dict ที่มี key:
-      total_trades, winning_trades, losing_trades
-      win_rate_pct, profit_factor
-      avg_win_thb, avg_loss_thb, expectancy_thb
-      max_consec_wins, max_consec_losses
-      gross_profit_thb, gross_loss_thb, net_pnl_thb
-      total_cost_thb   ← spread + commission รวมทุก trade
-      largest_win_thb, largest_loss_thb
     """
     if not closed_trades:
         return {
@@ -224,11 +211,11 @@ def calculate_trade_metrics(closed_trades) -> dict:
             "total_cost_thb":    0.0,
             "largest_win_thb":   0.0,
             "largest_loss_thb":  0.0,
-            "best_annualized_trade_pct": 0.0,
-            "worst_annualized_trade_pct": 0.0,
-            "median_annualized_pct": 0.0,
-            "top10_annualized_trade_pct": 0.0,
-            "bottom10_annualized_trade_pct": 0.0,
+            "best_trade_return_pct": 0.0,
+            "worst_trade_return_pct": 0.0,
+            "median_trade_return_pct": 0.0,
+            "top10_trade_return_pct": 0.0,
+            "bottom10_trade_return_pct": 0.0,
             "xirr_pct": 0.0,
             "avg_capital_per_year_thb": 0.0,
         }
@@ -241,22 +228,19 @@ def calculate_trade_metrics(closed_trades) -> dict:
     loss_count = len(losses)
 
     # ── PnL aggregates ────────────────────────────────────────────────
-    gross_profit = sum(t.pnl_thb for t in wins)          # รวม PnL ของ winning trades
-    gross_loss   = sum(t.pnl_thb for t in losses)        # รวม PnL ของ losing trades (ลบ)
+    gross_profit = sum(t.pnl_thb for t in wins)          
+    gross_loss   = sum(t.pnl_thb for t in losses)        
     net_pnl      = sum(t.pnl_thb for t in closed_trades)
     total_cost   = sum(t.cost_thb for t in closed_trades)
 
     # ── Averages ──────────────────────────────────────────────────────
     avg_win  = gross_profit / win_count  if win_count  else 0.0
-    avg_loss = gross_loss   / loss_count if loss_count else 0.0   # ค่าลบ
+    avg_loss = gross_loss   / loss_count if loss_count else 0.0   
 
-    # Expectancy = กำไรเฉลี่ยที่คาดหวังต่อ 1 trade
     win_rate    = win_count / n
     expectancy  = (win_rate * avg_win) + ((1 - win_rate) * avg_loss)
 
     # ── Profit Factor ────────────────────────────────────────────────
-    # = ผลรวมกำไร / ผลรวมขาดทุน (absolte)
-    # > 1.0 = มีกำไรสุทธิ, > 1.5 = ดี, > 2.0 = ดีมาก
     abs_loss = abs(gross_loss)
     profit_factor = round(gross_profit / abs_loss, 3) if abs_loss > 1e-6 else float("inf")
 
@@ -275,20 +259,24 @@ def calculate_trade_metrics(closed_trades) -> dict:
         max_consec_losses = max(max_consec_losses, cur_losses)
 
     # ── Extremes ─────────────────────────────────────────────────────
-    all_pnl      = [t.pnl_thb for t in closed_trades]
     largest_win  = max((t.pnl_thb for t in wins), default=0.0)
     largest_loss = min((t.pnl_thb for t in losses), default=0.0)
 
-    # ── Annualized per-trade metrics ──────────────────────────────────────
-    annualized_list = []
+    # ── Per-trade ROI metrics (แทนที่ Annualized) ──────────────────────
+    roi_list = []
     capital_days = 0.0
-    cashflows = []
+    cashflows =[]
+    
     for t in closed_trades:
         days = _safe_days_held(t)
         buy_amt = _safe_buy_amount(t)
         if days and buy_amt and buy_amt > 0:
             capital_days += buy_amt * days
-            r = float(getattr(t, "pnl_thb", 0.0)) / buy_amt
+            
+            # [FIX] คำนวณ Simple ROI (%) ต่อไม้ แทนการทำ Annualized
+            roi = (float(getattr(t, "pnl_thb", 0.0)) / buy_amt) * 100.0
+            roi_list.append(roi)
+            
             buy_dt = _coerce_datetime(
                 getattr(t, "buy_date", None)
                 or getattr(t, "entry_date", None)
@@ -302,19 +290,15 @@ def calculate_trade_metrics(closed_trades) -> dict:
             if buy_dt and sell_dt:
                 cashflows.append((buy_dt, -buy_amt))
                 cashflows.append((sell_dt, buy_amt + float(getattr(t, "pnl_thb", 0.0))))
-            try:
-                ann = ((1.0 + r) ** (365.0 / days) - 1.0) * 100.0
-                if math.isfinite(ann):
-                    annualized_list.append(ann)
-            except Exception:
-                pass
 
-    annualized_list.sort()
-    best_ann = max(annualized_list) if annualized_list else 0.0
-    worst_ann = min(annualized_list) if annualized_list else 0.0
-    median_ann = _percentile(annualized_list, 0.5) if annualized_list else 0.0
-    top10_ann = _percentile(annualized_list, 0.9) if annualized_list else 0.0
-    bottom10_ann = _percentile(annualized_list, 0.1) if annualized_list else 0.0
+    roi_list.sort()
+    best_roi = max(roi_list) if roi_list else 0.0
+    worst_roi = min(roi_list) if roi_list else 0.0
+    median_roi = _percentile(roi_list, 0.5) if roi_list else 0.0
+    top10_roi = _percentile(roi_list, 0.9) if roi_list else 0.0
+    bottom10_roi = _percentile(roi_list, 0.1) if roi_list else 0.0
+    
+    # XIRR ยังคงไว้ แต่ถ้าเทรดสั้นมากๆ ตัวเลขอาจจะยังสูงอยู่ (เป็นเรื่องปกติของ XIRR)
     xirr_pct = _xirr(sorted(cashflows, key=lambda x: x[0])) * 100.0 if cashflows else 0.0
     avg_capital_year = (capital_days / 365.0) if capital_days > 0 else 0.0
 
@@ -325,21 +309,24 @@ def calculate_trade_metrics(closed_trades) -> dict:
         "win_rate_pct":      round(win_rate * 100, 2),
         "profit_factor":     profit_factor,
         "avg_win_thb":       round(avg_win, 2),
-        "avg_loss_thb":      round(avg_loss, 2),    # ค่าลบ
-        "expectancy_thb":    round(expectancy, 2),  # คาดหวังต่อ 1 trade
+        "avg_loss_thb":      round(avg_loss, 2),    
+        "expectancy_thb":    round(expectancy, 2),  
         "max_consec_wins":   max_consec_wins,
         "max_consec_losses": max_consec_losses,
         "gross_profit_thb":  round(gross_profit, 2),
-        "gross_loss_thb":    round(gross_loss, 2),  # ค่าลบ
+        "gross_loss_thb":    round(gross_loss, 2),  
         "net_pnl_thb":       round(net_pnl, 2),
-        "total_cost_thb":    round(total_cost, 2),  # spread+commission ทั้งหมด
+        "total_cost_thb":    round(total_cost, 2),  
         "largest_win_thb":   round(largest_win, 2),
         "largest_loss_thb":  round(largest_loss, 2),
-        "best_annualized_trade_pct": round(best_ann, 2),
-        "worst_annualized_trade_pct": round(worst_ann, 2),
-        "median_annualized_pct": round(median_ann, 2),
-        "top10_annualized_trade_pct": round(top10_ann, 2),
-        "bottom10_annualized_trade_pct": round(bottom10_ann, 2),
+        
+        # [FIX] เปลี่ยนชื่อ Key ให้สะท้อนความเป็นจริง (ROI ต่อไม้)
+        "best_trade_return_pct": round(best_roi, 2),
+        "worst_trade_return_pct": round(worst_roi, 2),
+        "median_trade_return_pct": round(median_roi, 2),
+        "top10_trade_return_pct": round(top10_roi, 2),
+        "bottom10_trade_return_pct": round(bottom10_roi, 2),
+        
         "xirr_pct": round(xirr_pct, 2),
         "avg_capital_per_year_thb": round(avg_capital_year, 2),
     }
@@ -356,12 +343,6 @@ def add_calmar(trade_metrics: dict, risk_metrics: dict) -> dict:
     เพิ่ม calmar_ratio เข้าไปใน trade_metrics
     Calmar = annualized_return_pct / abs(mdd_pct)
     > 1.0 = ดี, > 2.0 = ดีมาก
-
-    Parameters
-    ----------
-    trade_metrics : dict จาก calculate_trade_metrics()
-    risk_metrics  : dict จาก _compute_risk_metrics() — ต้องมี
-                    'annualized_return_pct' และ 'mdd_pct'
     """
     ann_return = risk_metrics.get("annualized_return_pct", 0.0)
     mdd        = risk_metrics.get("mdd_pct", 0.0)
@@ -383,7 +364,6 @@ if __name__ == "__main__":
     sys.path.insert(0, ".")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    # สร้าง mock ClosedTrade objects
     from dataclasses import dataclass
 
     @dataclass
@@ -394,13 +374,13 @@ if __name__ == "__main__":
         def __post_init__(self):
             self.is_win = self.pnl_thb > 0
 
-    trades = [
-        MockTrade(pnl_thb=120.0,  cost_thb=33.0),   # WIN
-        MockTrade(pnl_thb=-80.0,  cost_thb=33.0),   # LOSS
-        MockTrade(pnl_thb=200.0,  cost_thb=33.0),   # WIN
-        MockTrade(pnl_thb=-50.0,  cost_thb=33.0),   # LOSS
-        MockTrade(pnl_thb=-30.0,  cost_thb=33.0),   # LOSS
-        MockTrade(pnl_thb=90.0,   cost_thb=33.0),   # WIN
+    trades =[
+        MockTrade(pnl_thb=120.0,  cost_thb=33.0),   
+        MockTrade(pnl_thb=-80.0,  cost_thb=33.0),   
+        MockTrade(pnl_thb=200.0,  cost_thb=33.0),   
+        MockTrade(pnl_thb=-50.0,  cost_thb=33.0),   
+        MockTrade(pnl_thb=-30.0,  cost_thb=33.0),   
+        MockTrade(pnl_thb=90.0,   cost_thb=33.0),   
     ]
 
     m = calculate_trade_metrics(trades)
@@ -408,13 +388,8 @@ if __name__ == "__main__":
     for k, v in m.items():
         print(f"  {k:<25} {v}")
 
-    # ทดสอบ Calmar
     risk = {"annualized_return_pct": 18.5, "mdd_pct": -12.3}
     m2 = add_calmar(m, risk)
     print(f"\n  calmar_ratio            {m2['calmar_ratio']}")
-
-    # ทดสอบ empty
-    m3 = calculate_trade_metrics([])
-    print(f"\nEmpty trades: {m3['note']}")
 
     print("\nDONE ✓")

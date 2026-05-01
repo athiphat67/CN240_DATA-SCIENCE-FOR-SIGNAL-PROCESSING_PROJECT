@@ -60,6 +60,7 @@ class SessionGateResult:
     apply_gate: bool
     session_id: Optional[str] = None
     quota_group_id: Optional[str] = None
+    session_start_iso: Optional[str] = None  # ✅ [NEW] ISO timestamp ของจุดเริ่ม session
     quota_urgent: bool = False
     minutes_to_session_end: Optional[int] = None
     llm_mode: Optional[str] = None  # "edge" | "quota"
@@ -71,11 +72,16 @@ class SessionGateResult:
             "apply_gate": self.apply_gate,
             "session_id": self.session_id,
             "quota_group_id": self.quota_group_id,
+            "session_start_iso": self.session_start_iso,  # ✅ [NEW]
             "quota_urgent": self.quota_urgent,
+            # ✅ [FIX Bug 1] alias keys ที่ risk.py ต้องการ
+            "near_session_end": self.quota_urgent,            # alias → quota_urgent
+            "is_dead_zone": not self.apply_gate,              # ✅ Gate 0a ต้องการ
             "minutes_to_session_end": self.minutes_to_session_end,
             "llm_mode": self.llm_mode,
             "suggested_min_confidence": self.suggested_min_confidence,
             "notes": list(self.notes),
+            "trades_this_session": 0,  # ✅ default; inject จริงผ่าน attach_session_gate_to_market_state
         }
 
 
@@ -165,10 +171,20 @@ def resolve_session_gate(
     if quota_snapshot:
         notes.append(f"quota_snapshot (informational only): {quota_snapshot!r}")
 
+    # คำนวณ ISO timestamp ของจุดเริ่ม session สำหรับ query DB
+    start_dt = now.replace(
+        hour=win.start_min // 60,
+        minute=win.start_min % 60,
+        second=0,
+        microsecond=0
+    )
+    session_start_iso = start_dt.isoformat(timespec="seconds") + "Z"
+
     return SessionGateResult(
         apply_gate=True,
         session_id=win.session_id,
         quota_group_id=win.quota_group_id,
+        session_start_iso=session_start_iso,
         quota_urgent=quota_urgent,
         minutes_to_session_end=mins_left,
         llm_mode=llm_mode,
@@ -180,9 +196,12 @@ def resolve_session_gate(
 def attach_session_gate_to_market_state(
     market_state: dict,
     result: SessionGateResult,
+    trades_this_session: int = 0,  # ✅ [FIX Bug 1] inject ค่าจริงจาก portfolio
 ) -> None:
     """อัปเดต market_state ในก้อนเดียว — ลบ key ถ้าไม่ใช้ gate"""
     if result.apply_gate:
-        market_state["session_gate"] = result.to_market_dict()
+        d = result.to_market_dict()
+        d["trades_this_session"] = trades_this_session  # inject ค่าจริง
+        market_state["session_gate"] = d
     else:
         market_state.pop("session_gate", None)

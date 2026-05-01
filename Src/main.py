@@ -19,7 +19,73 @@ from agent_core.llm.client import OpenRouterClient
 from data_engine.orchestrator import GoldTradingOrchestrator
 from database.database import RunDatabase
 from ui.core.services import init_services
-from xgboost_signal import get_xgboost_signal
+from data_engine.extract_features import get_xgboost_feature
+# ─────────────────────────────────────────────────────────────
+# xgboost
+# ─────────────────────────────────────────────────────────────
+
+def get_xgboost_signal(raw_data: dict) -> str:
+    """
+    รับข้อมูลดิบ (Raw Data) -> สกัด Features -> ตัดข้อมูลที่ไม่เกี่ยวข้องออก -> ส่งให้โมเดล XGBoost บน Hugging Face ประมวลผล
+    และรับค่ากลับมาเป็น 'BUY', 'SELL', หรือ 'HOLD'
+    """
+    # 1. สกัด Features ออกมาเป็น Dictionary ด้วยฟังก์ชันที่คุณเขียนไว้
+    features = get_xgboost_feature(raw_data, as_dataframe=False)
+    
+    # 2. นำตัวแปรกลุ่ม Forex ออกจาก Features เพื่อโฟกัสที่ข้อมูลทองคำโดยตรง
+    if "usd_thb" in features:
+        del features["usd_thb"]
+
+    # ดึงค่า API Config จากไฟล์ .env
+    hf_token = os.getenv("HF_TOKEN")
+    hf_api_url = os.getenv("HF_XGBOOST_URL") 
+
+    if not hf_token or not hf_api_url:
+        print("⚠️ [XGBoost] ข้ามการทำงาน: ไม่พบ HF_TOKEN หรือ HF_XGBOOST_URL ใน .env")
+        return "HOLD"
+
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json"
+    }
+
+    # จัดรูปแบบ Payload ตามที่ Hugging Face Inference API ต้องการ
+    payload = {
+        "inputs": features 
+    }
+
+    try:
+        # กำหนด Timeout สั้นๆ ไว้ที่ 10 วินาที เพื่อรักษาความเร็วในการออกไม้เทรด
+        response = requests.post(hf_api_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        signal = "HOLD"
+        # จัดการโครงสร้าง Response ที่อาจแตกต่างกันตามการตั้งค่าบน Hugging Face
+        if isinstance(result, list) and len(result) > 0:
+            if isinstance(result[0], dict):
+                signal = result[0].get("label", "HOLD")
+            else:
+                signal = str(result[0])
+        elif isinstance(result, dict):
+            signal = result.get("label", result.get("prediction", "HOLD"))
+            
+        signal = signal.upper()
+        
+        if signal in ["BUY", "SELL", "HOLD"]:
+            print(f"🌲 [XGBoost] ประมวลผลสำเร็จ ได้รับสัญญาณชี้เป้า: {signal}")
+            return signal
+        else:
+            print(f"⚠️ [XGBoost] สัญญาณที่ได้ไม่ตรงรูปแบบ (ได้ '{signal}'), ใช้ HOLD แทน")
+            return "HOLD"
+
+    except requests.exceptions.Timeout:
+        print("❌ [XGBoost] API Timeout: Hugging Face ตอบสนองช้าเกินไป ข้ามไปใช้ HOLD")
+        return "HOLD"
+    except Exception as e:
+        print(f"❌ [XGBoost] API Error: {e}")
+        return "HOLD"
     
 # ─────────────────────────────────────────────────────────────
 # Print helpers  (เหมือน main.py ทุกอย่าง)
@@ -125,11 +191,7 @@ def build_runtime(*, no_save: bool = False) -> dict:
 
     orchestrator = GoldTradingOrchestrator()
     db = None if no_save else RunDatabase()
-
-    services = init_services(
-        skill_registry, role_registry, orchestrator, db,
-        xgb_fetcher=get_xgboost_signal,
-    )
+    services = init_services(skill_registry, role_registry, orchestrator, db)
 
     return {
         "skill_registry": skill_registry,
@@ -177,7 +239,7 @@ def send_trade_log_from_result(result: dict, *, emit_logs: bool = True) -> None:
     best_result = ivr[best_iv]
 
     price = best_result.get("entry_price") or "MARKET"
-    reason = best_result.get("rationale") or f"Auto-generated signal based on {action} decision"
+    rationale = best_result.get("rationale") or f"Auto-generated signal based on {action} decision"
     confidence = result["voting_result"]["weighted_confidence"]
     stop_loss = best_result.get("stop_loss", 0.0)
     take_profit = best_result.get("take_profit", 0.0)
@@ -190,15 +252,16 @@ def send_trade_log_from_result(result: dict, *, emit_logs: bool = True) -> None:
 
     if emit_logs:
         print("\n[goldtrader] Sending customized Trade Log to API...")
+        
+    print(f"Action: {action}")
+    print(f"Price:  {price}")
+    print(f"Reason: {rationale}")
 
     send_trade_log(
         action=action,
         price=price,
         reason=reason,
         api_key=team_api_key,
-        confidence=confidence,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
     )
 
 
@@ -267,7 +330,7 @@ def _build_parser() -> argparse.ArgumentParser:
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    interval_seconds = 900  # ตั้งค่า 10 นาที (600 วินาที), = 0 ปิด auto run
+    interval_seconds = 300  # ตั้งค่า 10 นาที (600 วินาที), = 0 ปิด auto run
 
     # parse args ครั้งเดียวนอก loop — ไม่ re-parse ทุก cycle
     parser = _build_parser()
@@ -280,33 +343,33 @@ def main():
 
     # ── WatcherEngine: สร้างครั้งเดียวก่อน loop ─────────────────────────
     # (import ที่นี่เพื่อไม่ให้ crash ถ้า engine ยังไม่มี — graceful fallback)
-    # _watcher = None
-    # try:
-    #     from engine.engine import WatcherEngine
+    _watcher = None
+    try:
+         from engine.engine import WatcherEngine
 
-    #     # สร้าง orchestrator + db ชั่วคราวสำหรับ watcher init
-    #     # (watcher ใช้ analysis_service ที่สร้างใน loop แรก ไม่ได้ ต้องสร้างก่อน)
-    #     _w_skill = SkillRegistry()
-    #     _w_skill.load_from_json(os.path.join(current_dir, "agent_core", "config", "skills.json"))
-    #     _w_role  = RoleRegistry(_w_skill)
-    #     _w_role.load_from_json(os.path.join(current_dir, "agent_core", "config", "roles.json"))
-    #     _w_orch  = GoldTradingOrchestrator()
-    #     _w_db    = RunDatabase()
-    #     _w_svc   = init_services(_w_skill, _w_role, _w_orch, _w_db)
+         # สร้าง orchestrator + db ชั่วคราวสำหรับ watcher init
+         # (watcher ใช้ analysis_service ที่สร้างใน loop แรก ไม่ได้ ต้องสร้างก่อน)
+         _w_skill = SkillRegistry()
+         _w_skill.load_from_json(os.path.join(current_dir, "agent_core", "config", "skills.json"))
+         _w_role  = RoleRegistry(_w_skill)
+         _w_role.load_from_json(os.path.join(current_dir, "agent_core", "config", "roles.json"))
+         _w_orch  = GoldTradingOrchestrator()
+         _w_db    = RunDatabase()
+         _w_svc   = init_services(_w_skill, _w_role, _w_orch, _w_db)
 
-    #     _watcher = WatcherEngine(
-    #         analysis_service  = _w_svc["analysis"],
-    #         data_orchestrator = _w_orch,
-    #         watcher_config    = {
-    #             "provider":  args.provider,
-    #             "period":    args.period,
-    #             "interval":  '5m',
-    #         },
-    #     )
-    #     _watcher.start()
-    #     print("🔭 WatcherEngine started (background thread)")
-    # except Exception as _we:
-    #     print(f"⚠️  WatcherEngine not started: {_we}")
+         _watcher = WatcherEngine(
+             analysis_service  = _w_svc["analysis"],
+             data_orchestrator = _w_orch,
+             watcher_config    = {
+                 "provider":  args.provider,
+                 "period":    args.period,
+                 "interval":  '5m',
+             },
+         )
+         _watcher.start()
+         print("🔭 WatcherEngine started (background thread)")
+    except Exception as _we:
+         print(f"⚠️  WatcherEngine not started: {_we}")
 
     while True:
         try:

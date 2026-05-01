@@ -59,8 +59,9 @@ mock_state.json
 Src/agent_core/data/latest.json
 Src/agent_core/data/payload_*.json
 
-# Ignore all JSON files (Remove this if you need to commit config.json files)
+# Ignore runtime JSON files by default, but keep required model/config schemas trackable.
 *.json
+!Src_V2/models/feature_columns.json
 
 # ─────────────────────────────────────────────────────────────────────────
 # Secrets & Environment Variables (CRITICAL)
@@ -90,8 +91,15 @@ Data/features_master.csv
 Src/data_engine/interceptor_xauthb_fetch/gold_prices_dataset.csv
 
 # log files
-logs/
+/logs/
 *.log
+*.log.*
+Src_V2/logs/logs/
+!Src_V2/logs/
+!Src_V2/logs/*.py
+!Src_V2/logs/about_loggerSetup.md
 
 
 node_modules/
+
+CLAUDE.md

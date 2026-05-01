@@ -16,6 +16,7 @@ Changes v3.3:
 
 import time
 import json
+import numpy as np
 import asyncio
 import logging
 from typing import Optional, Dict, List
@@ -54,7 +55,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 from data_engine.analysis_tools.pre_fetch import pre_fetch_market_data
-
+from agent_core.core.xgboost_signal import XGBoostPredictor, SignalAggregator
 
 # ─────────────────────────────────────────────
 # Provider Name Normalization
@@ -232,7 +233,7 @@ class AnalysisService:
         
         # ── [NEW] 1. ดึงความทรงจำจากความเจ็บปวด (Reflective Memory) ──
         recent_trades = []
-        print(recent_trades)
+        # print(recent_trades)
         if self.persistence:
                 try:
                     # ใช้ get_trade_history แทน get_recent_runs เพื่อดึง PnL จริง
@@ -406,6 +407,7 @@ class AnalysisService:
                         "confidence": round(interval_result.get("confidence", 0.0), 3),
                         "weight":     1.0,
                     }],
+                    "rationale": interval_result.get("rationale", ""),  # ← เพิ่มบรรทัดนี้
                 }
 
                 sys_logger.info(
@@ -466,7 +468,7 @@ class AnalysisService:
                         market_state     = market_state,
                         provider         = provider_label,
                         period           = period,
-                        run_id           = None,   # ยังไม่มี run_id ตอนนี้
+                        run_id = run_id,   # ยังไม่มี run_id ตอนนี้
                     )
                     if sent:
                         sys_logger.info("Discord notification sent ✅")
@@ -480,7 +482,7 @@ class AnalysisService:
                         voting_result=voting_result,
                         interval_results=interval_results,  
                         market_state=market_state,         
-                        provider=provider,
+                        provider=provider_label,
                         period=period,
                         run_id=run_id
                     )
@@ -639,7 +641,15 @@ class AnalysisService:
             
             market_state["interval"] = interval
             gate_res = resolve_session_gate(force_bypass=bypass_session_gate)
-            attach_session_gate_to_market_state(market_state, gate_res)
+            
+            # ✅ ดึง trades_this_session จาก Portfolio โดยตรง (รอ frontend อัปเดต manual)
+            _trades_this_session = int(
+                market_state.get("portfolio", {}).get("trades_this_session", 0) or 0
+            )
+            # พิมพ์ออก Console โดยตรงเพื่อให้ตรวจสอบได้ง่าย
+            print(f"\n📊 [PORTFOLIO CHECK] Trades in this session: {_trades_this_session}")
+            sys_logger.info(f"[Session Quota] Pulled trades_this_session from portfolio: {_trades_this_session} trades")
+            attach_session_gate_to_market_state(market_state, gate_res, trades_this_session=_trades_this_session)
             
             # ═══════════════════════════════════════════
             # GATE-2 │ services.py → หลัง data_orchestrator.run()
@@ -777,13 +787,81 @@ class AnalysisService:
                 risk_manager=self.risk_manager,
             )
             
-            # ═══════════════════════════════════════════
+            ## ═══════════════════════════════════════════
             # GATE-4 IN │ services.py → ก่อน react_orchestrator.run()
             # ═══════════════════════════════════════════
-            # print("\n" + "="*60)
-            # print("GATE-4 IN │ REACT INPUT")
-            # print(json.dumps(market_state, indent=2, ensure_ascii=False, default=str))
-            # print("="*60 + "\n")
+            
+            current_session = gate_res.session_id if gate_res.apply_gate else "Morning"
+            is_market_open = gate_res.apply_gate
+
+            # 2. สร้าง Predictor
+            predictor = XGBoostPredictor(
+                repo_id="athiphatss/Xgboost_HSH965_gold_trading_signal",
+                filename="feature_columns.json"
+            )
+
+            # 3. เตรียม features_dict
+            features_dict = {
+                "xauusd_open": market_state.get("market_data", {}).get("ohlcv", {}).get("open", 0.0),
+                "xauusd_high": market_state.get("market_data", {}).get("ohlcv", {}).get("high", 0.0),
+                "xauusd_low": market_state.get("market_data", {}).get("ohlcv", {}).get("low", 0.0),
+                "xauusd_close": market_state.get("market_data", {}).get("ohlcv", {}).get("close", 0.0),
+                "hour_sin": np.sin(2 * np.pi * datetime.now().hour / 24),
+                "hour_cos": np.cos(2 * np.pi * datetime.now().hour / 24),
+                "day_of_week": datetime.now().weekday(),
+            }
+
+            # 4. รัน Predictor เพื่อเอา XGBoost Signal
+            xgb_out = predictor.predict(features_dict, session=current_session)
+            # print(xgb_out)
+            
+            # --- [NEW] 5. คำนวณ Dynamic Weights ---
+            # ดึงทิศทางจาก 3 แหล่ง
+            xgb_dir = str(getattr(xgb_out, "signal", "HOLD")).upper()
+            
+            news_score = market_state.get("news", {}).get("sentiment_score", 0.0)
+            news_dir = "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
+            
+            tech_trend = market_state.get("technical_indicators", {}).get("trend", {}).get("trend", "").lower()
+            tech_dir = "BUY" if "up" in tech_trend else "SELL" if "down" in tech_trend else "HOLD"
+
+            # กำหนดน้ำหนักตาม Session
+            if is_market_open and current_session == "Evening":
+                w_xgb, w_news, w_tech = 0.35, 0.45, 0.20
+            elif current_session == "Morning":
+                w_xgb, w_news, w_tech = 0.55, 0.15, 0.30
+            else:
+                w_xgb, w_news, w_tech = 0.50, 0.20, 0.30
+
+            # คำนวณคะแนน
+            bull_score, bear_score = 0.0, 0.0
+            
+            if xgb_dir == "BUY": bull_score += w_xgb
+            elif xgb_dir == "SELL": bear_score += w_xgb
+            
+            if news_dir == "BUY": bull_score += w_news
+            elif news_dir == "SELL": bear_score += w_news
+            
+            if tech_dir == "BUY": bull_score += w_tech
+            elif tech_dir == "SELL": bear_score += w_tech
+
+            # สรุปผล
+            if bull_score > bear_score:
+                final_dir, base_conf = "BUY", bull_score
+            elif bear_score > bull_score:
+                final_dir, base_conf = "SELL", bear_score
+            else:
+                final_dir, base_conf = "HOLD", 0.50
+
+            # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
+            market_state["dynamic_weights"] = {
+                "session": current_session,
+                "xgb_w": w_xgb,
+                "news_w": w_news,
+                "tech_w": w_tech,
+                "direction": final_dir,
+                "base_confidence": round(base_conf, 2)
+            }
             
             slim_state = self.data_orchestrator.pack(market_state)
             

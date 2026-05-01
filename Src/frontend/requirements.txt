@@ -3,3 +3,4 @@ uvicorn
 python-dotenv
 psycopg2-binary 
 supabase
+xgboost==2.1.4

@@ -15,14 +15,6 @@ engine/sniper_filter.py  — Sniper Pre-filter v1.0
   [5] SELL Pass      — ถ้าถือทองอยู่ ให้ผ่านกรองเสมอ (SELL/EXIT ห้ามบล็อก)
 
 Return: SniperResult (dataclass) บอกว่า should_call_llm=True/False + reason
-
-ใช้งาน (ใน run_main_backtest.py):
-  from engine.sniper_filter import SniperFilter, SniperResult
-
-  sniper = SniperFilter()
-  result = sniper.check(row, portfolio, session_trades_this_session)
-  if not result.should_call_llm:
-      return _build_hold_result(ts, price, result.reason)
 ══════════════════════════════════════════════════════════════════════
 """
 
@@ -36,6 +28,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# 🌟[FIX] กำหนดค่าคงที่แทน Magic Number
+DEFAULT_POSITION_THB = 1000.0
 
 # ══════════════════════════════════════════════════════════════════
 # Config — ปรับได้ตามผล Backtest
@@ -44,46 +38,39 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SniperConfig:
     # ── [1] Session Quota ──────────────────────────────────────────
-    # จำนวน BUY entry สูงสุดต่อ session (AB / AFTN / EVEN)
     max_buy_per_session: int = 1
 
     # ── [2] Dip Setup ──────────────────────────────────────────────
-    # RSI ต่ำกว่า threshold ถือว่า "oversold / dip zone"
     rsi_dip_threshold: float = 45.0
-
-    # ราคาต้องอยู่ภายใน bb_band_pct% จาก BB Lower เพื่อนับว่า "near support"
-    # เช่น 0.003 = ราคาต้องอยู่ภายใน 0.3% จาก BB Lower
     bb_band_pct: float = 0.005
-
-    # price pullback: ราคาต้องลงจาก recent high อย่างน้อย pullback_pct%
-    # เช่น 0.002 = ย่อลงมาอย่างน้อย 0.2% จากสูงสุด 5 แท่ง
     pullback_pct: float = 0.002
-
-    # จำนวน condition dip ขั้นต่ำที่ต้องผ่าน (จาก 3 ตัวข้างบน)
-    # ค่า 1 = ผ่านแค่ตัวเดียวก็พอ (หลวม), ค่า 2 = เข้มขึ้น
     min_dip_conditions: int = 1
 
-    # ── [3] Trend Filter ───────────────────────────────────────────
-    # True = กรอง downtrend ออก (EMA20 < EMA50 → ห้าม BUY)
+    # ──[3] Trend Filter ───────────────────────────────────────────
     enable_trend_filter: bool = True
-
-    # True = อนุญาตให้ BUY ได้แม้ trend neutral (EMA20 ≈ EMA50)
     allow_neutral_trend: bool = True
-
-    # ema_neutral_pct: % gap ระหว่าง EMA20/EMA50 ที่นับว่า "neutral"
     ema_neutral_pct: float = 0.003
 
     # ── [4] Spread Cover ───────────────────────────────────────────
-    # ATR ต้องมากกว่า spread_cover_multiplier เท่าของ spread
-    # เช่น 1.0 = ATR > spread (ขั้นต่ำ), 1.5 = ATR > 1.5x spread (เข้มขึ้น)
     spread_cover_multiplier: float = 1.0
-
-    # spread ของทองไทย (THB) — ใช้ fallback ถ้าไม่มีค่าใน row
     default_spread_thb: float = 200.0
 
     # ── [5] SELL Always Pass ───────────────────────────────────────
-    # True = ถ้าถือทองอยู่ (gold_grams > 0) ให้ call LLM เสมอ
     sell_always_pass: bool = True
+
+    # ── [6] Master Merged Label ────────────────────────────────────
+    use_master_label: bool = True
+    buy_score_threshold: float = 0.0
+    require_master_label: bool = False
+
+    # ── [8] Min Expected Profit ────────────────────────────────────
+    min_expected_profit_thb: float = 1.5
+    expected_rr_ratio: float = 2.0
+    expected_position_thb: float = 0.0
+
+    # ── Cluster Dedup ──────────────────────────────────────────────
+    cluster_dedup_mode: str = "middle"   # "off" | "first" | "middle" | "session"
+    cluster_gap_bars: int = 3
 
     # ── Debug ──────────────────────────────────────────────────────
     verbose: bool = False
@@ -96,8 +83,8 @@ class SniperConfig:
 @dataclass
 class SniperResult:
     should_call_llm: bool
-    reason: str               # สาเหตุที่ผ่าน หรือ บล็อก
-    dip_score: int = 0        # จำนวน dip conditions ที่ผ่าน (0-3)
+    reason: str               
+    dip_score: int = 0        
     checks: Dict[str, bool] = field(default_factory=dict)
 
     @property
@@ -110,18 +97,16 @@ class SniperResult:
 # ══════════════════════════════════════════════════════════════════
 
 class SniperFilter:
-    """
-    Pre-filter ที่ตรวจสอบแท่งเทียนก่อนส่งให้ LLM
-    สามารถ config ได้ผ่าน SniperConfig
-
-    ตัวอย่าง:
-        sniper = SniperFilter()                        # default config
-        sniper = SniperFilter(SniperConfig(rsi_dip_threshold=40))  # custom
-    """
-
     def __init__(self, config: Optional[SniperConfig] = None):
         self.cfg = config or SniperConfig()
-        self._session_buy_count: Dict[str, int] = {}  # key = "YYYY-MM-DD|SESSION_ID"
+        self._session_buy_count: Dict[str, int] = {}  
+
+        # ── Cluster Dedup State ───────────────────────────────────────
+        self._cluster_bar_index: int = 0          
+        self._cluster_start_bar: int = -999       
+        self._cluster_end_bar: int = -999         
+        self._cluster_fired_bar: int = -999       
+        self._cluster_session: Optional[str] = None  
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -132,23 +117,22 @@ class SniperFilter:
         session_id: Optional[str],
         date_str: str,
     ) -> SniperResult:
-        """
-        ตรวจสอบแท่งเทียนว่าควร call LLM หรือไม่
-
-        Parameters
-        ----------
-        row         : pd.Series — แท่งเทียนปัจจุบัน (ต้องมี rsi, bb_*, ema_*, atr)
-        gold_grams  : float     — ทองที่ถืออยู่ตอนนี้ (จาก portfolio.gold_grams)
-        session_id  : str|None  — session ปัจจุบัน (AB / AFTN / EVEN / None)
-        date_str    : str       — วันที่ "YYYY-MM-DD"
-
-        Returns
-        -------
-        SniperResult
-        """
         cfg = self.cfg
 
-        # ── [5] SELL Always Pass — ถ้าถือทองอยู่ ให้ผ่านเสมอ ──────────
+        self._cluster_bar_index += 1
+        cur_bar = self._cluster_bar_index
+
+        if cfg.cluster_dedup_mode != "off" and cfg.use_master_label:
+            _tb_pre = float(row.get("target_buy", -1.0))
+            if _tb_pre == 1.0:
+                _gap = cur_bar - self._cluster_end_bar
+                if _gap > cfg.cluster_gap_bars:
+                    self._cluster_start_bar = cur_bar
+                    self._cluster_fired_bar = -999
+                    if cfg.cluster_dedup_mode == "session":
+                        self._cluster_session = None
+                self._cluster_end_bar = cur_bar
+
         if cfg.sell_always_pass and gold_grams > 1e-4:
             return SniperResult(
                 should_call_llm=True,
@@ -157,7 +141,24 @@ class SniperFilter:
                 checks={"sell_always_pass": True},
             )
 
-        # ── [1] Session Quota ─────────────────────────────────────────
+        if cfg.require_master_label:
+            target_buy = float(row.get("target_buy", -1.0))
+            buy_score  = float(row.get("buy_score",  -1.0))
+            label_pass = (target_buy == 1.0) and (buy_score >= cfg.buy_score_threshold)
+            if not label_pass:
+                reason = (
+                    f"NO_LABEL: target_buy={target_buy} buy_score={buy_score:.3f} "
+                    f"(need target_buy=1 & score≥{cfg.buy_score_threshold})"
+                )
+                if cfg.verbose:
+                    logger.debug(f"  ⏭ SniperFilter {reason}")
+                return SniperResult(
+                    should_call_llm=False,
+                    reason=reason,
+                    dip_score=0,
+                    checks={"master_label": False},
+                )
+
         quota_key = f"{date_str}|{session_id or 'UNKNOWN'}"
         buys_this_session = self._session_buy_count.get(quota_key, 0)
         quota_ok = buys_this_session < cfg.max_buy_per_session
@@ -169,18 +170,53 @@ class SniperFilter:
                 checks={"quota": False},
             )
 
-        # ── [2] Dip Setup Detection ───────────────────────────────────
+        if cfg.cluster_dedup_mode != "off" and cfg.use_master_label:
+            target_buy_val = float(row.get("target_buy", -1.0))
+            is_label_1 = (target_buy_val == 1.0)
+
+            if is_label_1:
+                should_fire = self._should_fire_cluster(
+                    cur_bar, session_id, cfg.cluster_dedup_mode
+                )
+
+                if not should_fire:
+                    reason = (
+                        f"CLUSTER_SKIP: mode={cfg.cluster_dedup_mode} | "
+                        f"cluster_start={self._cluster_start_bar} cur={cur_bar} "
+                        f"fired_at={self._cluster_fired_bar}"
+                    )
+                    if cfg.verbose:
+                        logger.debug(f"  ⏭ SniperFilter {reason}")
+                    return SniperResult(
+                        should_call_llm=False,
+                        reason=reason,
+                        dip_score=0,
+                        checks={"cluster_dedup": False},
+                    )
+                self._cluster_fired_bar = cur_bar
+                if cfg.cluster_dedup_mode == "session":
+                    self._cluster_session = session_id
+
+        if cfg.min_expected_profit_thb > 0:
+            profit_ok, profit_detail = self._check_min_profit(row)
+            if not profit_ok:
+                reason = f"LOW_PROFIT: {profit_detail}"
+                if cfg.verbose:
+                    logger.debug(f"  ⏭ SniperFilter {reason}")
+                return SniperResult(
+                    should_call_llm=False,
+                    reason=reason,
+                    dip_score=0,
+                    checks={"min_profit": False},
+                )
+
         dip_flags, dip_details = self._check_dip(row)
         dip_score = sum(dip_flags.values())
         dip_ok = dip_score >= cfg.min_dip_conditions
 
-        # ── [3] Trend Filter ──────────────────────────────────────────
         trend_ok, trend_detail = self._check_trend(row)
-
-        # ── [4] Spread Cover ──────────────────────────────────────────
         spread_ok, spread_detail = self._check_spread(row)
 
-        # ── Combine ───────────────────────────────────────────────────
         checks = {
             "quota":  quota_ok,
             "dip":    dip_ok,
@@ -197,7 +233,7 @@ class SniperFilter:
                 f"trend={trend_detail} | spread={spread_detail}"
             )
         else:
-            fails = []
+            fails =[]
             if not dip_ok:
                 fails.append(f"NO_DIP(score={dip_score}/{cfg.min_dip_conditions}: {dip_details})")
             if not trend_ok:
@@ -218,45 +254,132 @@ class SniperFilter:
         )
 
     def record_buy(self, date_str: str, session_id: Optional[str]):
-        """
-        บันทึกว่า session นี้มี BUY เกิดขึ้นแล้ว 1 ครั้ง
-        เรียกจาก _apply_to_portfolio() หลัง execute_buy สำเร็จ
-        """
         quota_key = f"{date_str}|{session_id or 'UNKNOWN'}"
         self._session_buy_count[quota_key] = self._session_buy_count.get(quota_key, 0) + 1
         logger.debug(f"  📌 SniperFilter: recorded BUY for {quota_key} "
                      f"(total={self._session_buy_count[quota_key]})")
 
     def reset(self):
-        """Reset session counters (ใช้ตอนเริ่ม backtest ใหม่)"""
         self._session_buy_count.clear()
+        self._cluster_bar_index = 0
+        self._cluster_start_bar = -999
+        self._cluster_end_bar = -999
+        self._cluster_fired_bar = -999
+        self._cluster_session = None
 
     def stats(self) -> dict:
-        """สรุปจำนวน BUY ที่บันทึกไว้แต่ละ session"""
         return dict(self._session_buy_count)
+
+    def diagnose(self, df: "pd.DataFrame", session_col: str = "session_id", date_col: str = "date_str") -> dict:
+        # 🌟 [FIX] ลบ import pandas as _pd ที่ซ้ำซ้อนออก ใช้ pd ตัวบนได้เลย
+        total = len(df)
+        label_1 = int((df.get("target_buy", pd.Series(dtype=float)) == 1.0).sum()) if "target_buy" in df.columns else 0
+        label_0 = total - label_1
+
+        temp = SniperFilter(SniperConfig(
+            cluster_dedup_mode=self.cfg.cluster_dedup_mode,
+            cluster_gap_bars=self.cfg.cluster_gap_bars,
+            use_master_label=self.cfg.use_master_label,
+            require_master_label=False,   
+            min_dip_conditions=0,
+            enable_trend_filter=False,
+            spread_cover_multiplier=0.0,
+            max_buy_per_session=9999,
+            sell_always_pass=False,
+        ))
+
+        cluster_pass = 0
+        cluster_skip = 0
+        for _, row in df.iterrows():
+            tb = float(row.get("target_buy", 0.0))
+            if tb != 1.0:
+                temp._cluster_bar_index += 1
+                continue
+            r = temp.check(
+                row,
+                gold_grams=0.0,
+                session_id=str(row.get(session_col, "UNK")),
+                date_str=str(row.get(date_col, "2000-01-01")),
+            )
+            if r.should_call_llm:
+                cluster_pass += 1
+            else:
+                cluster_skip += 1
+
+        return {
+            "total_bars":      total,
+            "label_1_bars":    label_1,
+            "label_0_bars":    label_0,
+            "label_1_pct":     f"{label_1/total*100:.1f}%" if total else "N/A",
+            "cluster_mode":    self.cfg.cluster_dedup_mode,
+            "cluster_gap":     self.cfg.cluster_gap_bars,
+            "cluster_pass":    cluster_pass,
+            "cluster_skip":    cluster_skip,
+            "pass_rate":       f"{cluster_pass/label_1*100:.1f}%" if label_1 else "N/A",
+            "note": "cluster_pass = จำนวนแท่งที่จะผ่านถึง LLM หลัง dedup",
+        }
 
     # ── Internal checks ───────────────────────────────────────────
 
-    def _check_dip(self, row: pd.Series):
-        """
-        ตรวจสอบ 3 dip conditions:
-          [A] RSI oversold      → rsi < rsi_dip_threshold
-          [B] Near BB Lower     → price within bb_band_pct% of BB Lower
-          [C] Price Pullback    → price ลงจาก recent high ≥ pullback_pct%
+    def _should_fire_cluster(
+        self,
+        cur_bar: int,
+        session_id: Optional[str],
+        mode: str,
+    ) -> bool:
+        if self._cluster_fired_bar >= self._cluster_start_bar:
+            return False
 
-        Returns
-        -------
-        flags   : dict[str, bool]
-        details : str (human-readable summary)
-        """
+        if mode == "first":
+            return cur_bar == self._cluster_start_bar
+
+        elif mode == "middle":
+            bars_into_cluster = cur_bar - self._cluster_start_bar
+            half_gap = self.cfg.cluster_gap_bars // 2  
+            return bars_into_cluster >= half_gap or cur_bar == self._cluster_start_bar
+
+        elif mode == "session":
+            return self._cluster_session != session_id
+
+        return True
+
+    def _check_min_profit(self, row: pd.Series):
+        cfg = self.cfg
+
+        buy_price  = float(row.get("Mock_HSH_Buy_Close", 0.0))
+        sell_price = float(row.get("Mock_HSH_Sell_Close", buy_price))
+        atr        = float(row.get("atr", 0.0))
+
+        if buy_price <= 0 or atr <= 0:
+            return True, "NO_PRICE_OR_ATR"
+
+        spread_per_unit = max(0.0, buy_price - sell_price)
+        if spread_per_unit <= 0:
+            spread_per_unit = cfg.default_spread_thb
+
+        # 🌟 [FIX] ใช้ค่าคงที่ DEFAULT_POSITION_THB แทน Magic Number 900.0
+        pos_thb = cfg.expected_position_thb if cfg.expected_position_thb > 0 else DEFAULT_POSITION_THB
+
+        units = pos_thb / buy_price
+        net_move_per_unit = (atr * cfg.expected_rr_ratio) - spread_per_unit
+        profit_est = units * net_move_per_unit
+
+        ok = profit_est >= cfg.min_expected_profit_thb
+        detail = (
+            f"est_profit={profit_est:.2f} THB "
+            f"(units={units:.5f} × net_move={net_move_per_unit:.0f}) "
+            f"[ATR={atr:.0f}×RR{cfg.expected_rr_ratio:.1f} − spread={spread_per_unit:.0f}] "
+            f"vs min={cfg.min_expected_profit_thb:.1f}"
+        )
+        return ok, detail
+
+    def _check_dip(self, row: pd.Series):
         cfg = self.cfg
         flags = {}
 
-        # ── [A] RSI ──────────────────────────────────────────────
         rsi = float(row.get("rsi", 50.0))
         flags["dip_rsi"] = rsi < cfg.rsi_dip_threshold
 
-        # ── [B] Near BB Lower ─────────────────────────────────────
         price = float(row.get("Mock_HSH_Sell_Close", row.get("close_thai", 0.0)))
         bb_lower = float(row.get("bb_lower", 0.0))
         if bb_lower > 0 and price > 0:
@@ -265,9 +388,6 @@ class SniperFilter:
         else:
             flags["dip_bb"] = False
 
-        # ── [C] Price Pullback ────────────────────────────────────
-        # ใช้ ema_20 เป็น proxy ของ recent high (ถ้าไม่มี high_thai)
-        # ถ้ามี high_thai ให้ใช้โดยตรง
         recent_high = float(row.get("Mock_HSH_Sell_High", row.get("high_thai", 0.0)))
         if recent_high <= 0:
             recent_high = float(row.get("ema_20", 0.0))
@@ -278,20 +398,23 @@ class SniperFilter:
         else:
             flags["dip_pullback"] = False
 
+        if cfg.use_master_label:
+            target_buy = float(row.get("target_buy", -1.0))
+            buy_score  = float(row.get("buy_score",  -1.0))
+            if target_buy >= 0:  
+                label_pass = (target_buy == 1.0) and (buy_score >= cfg.buy_score_threshold)
+                flags["dip_master_label"] = label_pass
+
         details = (
             f"RSI={rsi:.1f}({'✓' if flags['dip_rsi'] else '✗'}) | "
             f"BB_gap={'✓' if flags['dip_bb'] else '✗'} | "
             f"Pullback={'✓' if flags['dip_pullback'] else '✗'}"
+            + (f" | Label={'✓' if flags.get('dip_master_label') else '✗'}"
+               if "dip_master_label" in flags else "")
         )
         return flags, details
 
     def _check_trend(self, row: pd.Series):
-        """
-        Trend filter: EMA20 vs EMA50
-          uptrend   → ✓ PASS
-          neutral   → ✓ PASS (ถ้า allow_neutral_trend=True)
-          downtrend → ✗ BLOCK (ถ้า enable_trend_filter=True)
-        """
         cfg = self.cfg
 
         if not cfg.enable_trend_filter:
@@ -301,7 +424,6 @@ class SniperFilter:
         ema50 = float(row.get("ema_50", 0.0))
 
         if ema20 <= 0 or ema50 <= 0:
-            # ไม่มีข้อมูล EMA → ผ่านไปก่อน (ไม่บล็อก)
             return True, "NO_EMA_DATA"
 
         gap_pct = (ema20 - ema50) / ema50
@@ -317,18 +439,12 @@ class SniperFilter:
             return False, f"DOWNTREND(EMA20={ema20:.0f}<EMA50={ema50:.0f})"
 
     def _check_spread(self, row: pd.Series):
-        """
-        Spread coverage: ATR ต้องมากกว่า spread * multiplier
-        เพื่อให้มีโอกาสทำกำไรได้จริงหลังหักค่าสเปรด
-        """
         cfg = self.cfg
 
         atr = float(row.get("atr", 0.0))
         if atr <= 0:
-            # ไม่มี ATR → ผ่านไปก่อน
             return True, "NO_ATR"
 
-        # ประมาณ spread จาก buy-sell price หรือใช้ default
         buy_price = float(row.get("Mock_HSH_Buy_Close", 0.0))
         sell_price = float(row.get("Mock_HSH_Sell_Close", 0.0))
         if buy_price > 0 and sell_price > 0 and sell_price > buy_price:
@@ -340,67 +456,3 @@ class SniperFilter:
         ok = atr >= min_atr_needed
 
         return ok, f"ATR={atr:.0f} vs spread*{cfg.spread_cover_multiplier:.1f}={min_atr_needed:.0f}"
-
-
-# ══════════════════════════════════════════════════════════════════
-# Self-test
-# ══════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.DEBUG, format="%(message)s")
-
-    print("=" * 60)
-    print("SniperFilter v1.0 — Self Test")
-    print("=" * 60)
-
-    sf = SniperFilter(SniperConfig(verbose=True))
-
-    # ── Test 1: Dip Setup (ควรผ่าน) ──────────────────────────────
-    row_dip = pd.Series({
-        "rsi": 38.0,
-        "Mock_HSH_Sell_Close": 72000.0,
-        "Mock_HSH_Buy_Close":  71800.0,
-        "Mock_HSH_Sell_High":  72800.0,
-        "bb_lower": 71900.0,
-        "ema_20":   72100.0,
-        "ema_50":   71900.0,
-        "atr":      350.0,
-    })
-    r1 = sf.check(row_dip, gold_grams=0.0, session_id="AB", date_str="2026-04-01")
-    print(f"\nTest 1 (Dip Setup):  {r1.label} | {r1.reason}")
-    assert r1.should_call_llm, "Test 1 ควรผ่าน"
-
-    # ── Test 2: No Dip (ควร SKIP) ────────────────────────────────
-    row_flat = pd.Series({
-        "rsi": 55.0,
-        "Mock_HSH_Sell_Close": 73000.0,
-        "Mock_HSH_Buy_Close":  72800.0,
-        "Mock_HSH_Sell_High":  73100.0,
-        "bb_lower": 71000.0,
-        "ema_20":   72000.0,
-        "ema_50":   73500.0,  # downtrend
-        "atr":      200.0,
-    })
-    r2 = sf.check(row_flat, gold_grams=0.0, session_id="AB", date_str="2026-04-01")
-    print(f"Test 2 (No Dip):     {r2.label} | {r2.reason}")
-    assert not r2.should_call_llm, "Test 2 ควร SKIP"
-
-    # ── Test 3: Holding Gold → Always Pass ───────────────────────
-    r3 = sf.check(row_flat, gold_grams=0.08, session_id="AB", date_str="2026-04-01")
-    print(f"Test 3 (Hold Gold):  {r3.label} | {r3.reason}")
-    assert r3.should_call_llm, "Test 3 ถือทองอยู่ต้องผ่านเสมอ"
-
-    # ── Test 4: Quota Exceeded ────────────────────────────────────
-    sf.record_buy("2026-04-01", "AB")
-    r4 = sf.check(row_dip, gold_grams=0.0, session_id="AB", date_str="2026-04-01")
-    print(f"Test 4 (Quota Full): {r4.label} | {r4.reason}")
-    assert not r4.should_call_llm, "Test 4 quota เต็มต้อง SKIP"
-
-    # ── Test 5: New Session → Quota resets ───────────────────────
-    r5 = sf.check(row_dip, gold_grams=0.0, session_id="AFTN", date_str="2026-04-01")
-    print(f"Test 5 (New Session):{r5.label} | {r5.reason}")
-    assert r5.should_call_llm, "Test 5 session ใหม่ quota ยังไม่หมด"
-
-    print("\n✅ ทุก test ผ่าน!")
-    print("=" * 60)
