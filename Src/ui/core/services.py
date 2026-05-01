@@ -326,8 +326,34 @@ class AnalysisService:
 
                 market_state["portfolio"] = portfolio
 
+                # ── Dynamic PnL Update: Recalculate using latest market price ──
+                try:
+                    gold_grams = float(portfolio.get("gold_grams", 0.0))
+                    if gold_grams > 0:
+                        # ใช้ราคา "รับซื้อ (Buy Price)" เพราะเป็นราคาที่เราจะได้เงินจริงถ้าขายตอนนี้
+                        thai_gold = market_state.get("market_data", {}).get("thai_gold_thb", {})
+                        current_buy_price_baht = float(thai_gold.get("buy_price_thb", 0))
+                        
+                        if current_buy_price_baht > 0:
+                            price_per_gram = current_buy_price_baht / 15.244
+                            cost_basis_per_gram = float(portfolio.get("cost_basis_thb", 0))
+                            
+                            new_current_value = gold_grams * price_per_gram
+                            new_pnl = new_current_value - (gold_grams * cost_basis_per_gram)
+                            
+                            # Update the portfolio dict that goes into market_state
+                            portfolio["current_value_thb"] = round(new_current_value, 2)
+                            portfolio["unrealized_pnl"] = round(new_pnl, 2)
+                            sys_logger.info(
+                                f"Dynamic PnL Updated: Price={price_per_gram:.2f}/g, "
+                                f"Value={new_current_value:.2f}, PnL={new_pnl:+.2f}"
+                            )
+                except Exception as pnl_err:
+                    sys_logger.warning(f"Failed to update dynamic PnL: {pnl_err}")
+
                 # ===== Compact Portfolio Summary =====
                 cash = float(portfolio.get("cash_balance", 0.0))
+
                 gold = float(portfolio.get("gold_grams", 0.0))
                 cost = float(portfolio.get("cost_basis_thb", 0.0))
                 pnl = float(portfolio.get("unrealized_pnl", 0.0))
@@ -834,7 +860,8 @@ class AnalysisService:
             elif bear_score > bull_score:
                 final_dir, base_conf = "SELL", bear_score
             else:
-                final_dir, base_conf = "HOLD", 0.50
+                # ถ้าคะแนนเท่ากัน ให้ใช้ค่าเฉลี่ยของน้ำหนักที่เหลืออยู่ แทนการล็อค 0.5
+                final_dir, base_conf = "HOLD", (bull_score + bear_score) / 2 if (bull_score + bear_score) > 0 else 0.35
 
             # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
             market_state["dynamic_weights"] = {

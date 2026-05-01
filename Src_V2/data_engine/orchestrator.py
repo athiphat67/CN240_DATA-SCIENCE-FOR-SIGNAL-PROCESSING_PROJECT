@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from pathlib import Path
 import pandas as pd
@@ -10,6 +11,27 @@ from data_engine.tools.interceptor_manager import start_interceptor_background
 from data_engine.thailand_timestamp import get_thai_time
 
 logger = logging.getLogger(__name__)
+
+# ── Lazy import RunDatabase (ป้องกัน circular import และกรณีที่ DATABASE_URL ไม่ถูกตั้ง)
+def _try_get_portfolio_from_db() -> dict:
+    """
+    [v4.1 FIX] ดึง portfolio จาก DB โดยตรงเพื่อให้ Orchestrator รู้ trades_today จริง
+    ก่อนหน้านี้ดึงจาก price.get("portfolio", {}) ซึ่งไม่เคยมีค่าส่งคืน → trades_today = 0 เสมอ
+
+    Returns:
+        portfolio dict จาก DB หรือ {} ถ้า DB ไม่พร้อม / DATABASE_URL ไม่ถูกตั้ง
+    """
+    if not os.environ.get("DATABASE_URL"):
+        return {}
+    try:
+        from database.database import RunDatabase
+        db = RunDatabase()
+        portfolio = db.get_portfolio()
+        db.close()
+        return portfolio if isinstance(portfolio, dict) else {}
+    except Exception as e:
+        logger.warning("[Orchestrator] _try_get_portfolio_from_db failed: %s → using empty portfolio", e)
+        return {}
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 _WEEKEND_WARN = "Market is closed (Weekend) — Price data might be stale."
@@ -306,8 +328,15 @@ class GoldTradingOrchestrator:
         latest_news = latest_news[:10]
 
         effective_interval = interval or self.interval
-        portfolio = price.get("portfolio", {}) if isinstance(price.get("portfolio", {}), dict) else {}
+        # [v4.1 FIX] ดึง portfolio จาก DB โดยตรง (price dict ไม่เคยมี portfolio)
+        # ก่อนหน้านี้ price.get("portfolio") คืน {} เสมอ → trades_today = 0 → quota รวน
+        portfolio = _try_get_portfolio_from_db()
+        if not portfolio:
+            # fallback: ใช้จาก orchestrator context ถ้า DB ไม่พร้อม
+            portfolio = price.get("portfolio", {}) if isinstance(price.get("portfolio", {}), dict) else {}
         trades_today = int(portfolio.get("trades_today", 0) or 0)
+        logger.info("[Orchestrator] portfolio from DB: trades_today=%d cash=%.2f",
+                    trades_today, float(portfolio.get("cash_balance", 0) or 0))
         daily_target_entries = 3  # [FIX v2] 6→3 rounds/day
         remaining_entries = max(0, daily_target_entries - trades_today)
         now_hour = get_thai_time().hour

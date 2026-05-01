@@ -107,7 +107,9 @@ CREATE TABLE IF NOT EXISTS portfolio (
     current_value_thb REAL    NOT NULL DEFAULT 0.0,
     unrealized_pnl    REAL    NOT NULL DEFAULT 0.0,
     trades_today      INTEGER NOT NULL DEFAULT 0,
-    updated_at        TEXT    NOT NULL
+    updated_at        TEXT    NOT NULL,
+    take_profit_price REAL,             -- TP ราคา THB/gram ที่คำนวณตอน BUY
+    stop_loss_price   REAL              -- SL ราคา THB/gram ที่คำนวณตอน BUY
 );
 """
 
@@ -222,6 +224,9 @@ class RunDatabase:
                     ("portfolio", "trailing_stop_level_thb", "REAL"),
                     # ── v4.0: session quota tracking ──────────────────────
                     ("portfolio", "position_opened_session", "TEXT"),
+                    # ── v4.1: TP/SL tracking for RiskManager Gate 0b ──────
+                    ("portfolio", "take_profit_price", "REAL"),
+                    ("portfolio", "stop_loss_price", "REAL"),
                 ]
                 for table, col, typ in migrations:
                     # FIX: whitelist ก่อน interpolate เข้า f-string
@@ -629,8 +634,9 @@ class RunDatabase:
         query = """
             INSERT INTO portfolio (id, cash_balance, gold_grams, cost_basis_thb,
                                    current_value_thb, unrealized_pnl, trades_today, updated_at,
-                                   trailing_stop_level_thb, position_opened_session)
-            VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   trailing_stop_level_thb, position_opened_session,
+                                   take_profit_price, stop_loss_price)
+            VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 cash_balance             = EXCLUDED.cash_balance,
                 gold_grams               = EXCLUDED.gold_grams,
@@ -640,7 +646,9 @@ class RunDatabase:
                 trades_today             = EXCLUDED.trades_today,
                 updated_at               = EXCLUDED.updated_at,
                 trailing_stop_level_thb  = EXCLUDED.trailing_stop_level_thb,
-                position_opened_session  = EXCLUDED.position_opened_session;
+                position_opened_session  = EXCLUDED.position_opened_session,
+                take_profit_price        = EXCLUDED.take_profit_price,
+                stop_loss_price          = EXCLUDED.stop_loss_price;
         """
         values = (
             data.get("cash_balance", 1500.0),
@@ -652,6 +660,8 @@ class RunDatabase:
             datetime.utcnow().isoformat(timespec="seconds") + "Z",
             data.get("trailing_stop_level_thb"),
             data.get("position_opened_session"),   # [v4.0]
+            data.get("take_profit_price"),          # [v4.1] TP ราคา THB/gram ตอน BUY
+            data.get("stop_loss_price"),            # [v4.1] SL ราคา THB/gram ตอน BUY
         )
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -670,6 +680,8 @@ class RunDatabase:
             "updated_at": "",
             "trailing_stop_level_thb": None,
             "position_opened_session": None,   # [v4.0] session ที่เปิด position ไว้
+            "take_profit_price": None,         # [v4.1] TP ราคา THB/gram ตอน BUY
+            "stop_loss_price": None,           # [v4.1] SL ราคา THB/gram ตอน BUY
         }
         try:
             with self.get_connection() as conn:
@@ -989,16 +1001,18 @@ class RunDatabase:
 
                     # ── Step 2: UPDATE portfolio (UPSERT id=1) ────────
                     new_cost_basis = cost_basis if gold_after > 0 else 0.0
+                    # [v4.1] เคลียร์ TP/SL เมื่อปิดออเดอร์ (SELL)
                     cursor.execute(
                         """
                         INSERT INTO portfolio (
                             id, cash_balance, gold_grams, cost_basis_thb,
                             current_value_thb, unrealized_pnl, trades_today,
-                            updated_at, trailing_stop_level_thb
+                            updated_at, trailing_stop_level_thb,
+                            take_profit_price, stop_loss_price
                         )
                         VALUES (1, %s, %s, %s, %s, %s,
                                 COALESCE((SELECT trades_today FROM portfolio WHERE id=1), 0) + 1,
-                                %s, NULL)
+                                %s, NULL, NULL, NULL)
                         ON CONFLICT (id) DO UPDATE SET
                             cash_balance             = EXCLUDED.cash_balance,
                             gold_grams               = EXCLUDED.gold_grams,
@@ -1007,7 +1021,9 @@ class RunDatabase:
                             unrealized_pnl           = EXCLUDED.unrealized_pnl,
                             trades_today             = portfolio.trades_today + 1,
                             updated_at               = EXCLUDED.updated_at,
-                            trailing_stop_level_thb  = NULL;
+                            trailing_stop_level_thb  = NULL,
+                            take_profit_price        = NULL,
+                            stop_loss_price          = NULL;
                         """,
                         (
                             cash_after,

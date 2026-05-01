@@ -677,6 +677,23 @@ def _persist_run(
             except Exception as sq_err:
                 sys_logger.error(f"[persist] session_quota update failed: {sq_err}")
 
+        # ── [v4.1] อัปเดต take_profit_price / stop_loss_price ลง portfolio ──
+        # BUY  → บันทึก TP/SL ที่คำนวณได้ เพื่อให้ RiskManager ใช้ Gate 0b
+        # SELL → เคลียร์ค่า TP/SL (= None) เพื่อรีเซ็ตสถานะ
+        if decision.notify and decision.final in ("BUY", "SELL"):
+            try:
+                portfolio_snap = rt.database.get_portfolio()
+                portfolio_snap["take_profit_price"] = decision.take_profit_price
+                portfolio_snap["stop_loss_price"]   = decision.stop_loss_price
+                rt.database.save_portfolio(portfolio_snap)
+                sys_logger.info(
+                    "[persist] portfolio TP/SL updated: tp=%s sl=%s",
+                    decision.take_profit_price,
+                    decision.stop_loss_price,
+                )
+            except Exception as tp_err:
+                sys_logger.error(f"[persist] portfolio TP/SL update failed: {tp_err}")
+
         return run_id
     except Exception as exc:
         sys_logger.error(f"[persist] save_run failed: {exc}")
@@ -908,20 +925,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     _install_signal_handlers()
 
-    sys_logger.info("═" * 60)
-    sys_logger.info("  ⛏️  นักขุดทอง v2.1  —  XGBoost Gold Signal Loop")
-    sys_logger.info("─" * 60)
-    sys_logger.info("  💰 capital    ฿%s", f"{INITIAL_CAPITAL_THB:,.0f}")
-    sys_logger.info("  ⏱  interval   %ss", args.interval)
-    sys_logger.info("  🤖 model_buy  %s", args.model_buy)
-    sys_logger.info("  🤖 model_sell %s", args.model_sell)
-    sys_logger.info("  📐 features   %s", args.feature_schema)
-    sys_logger.info(
-        "  🔧 flags      skip_fetch=%s  no_save=%s  once=%s",
-        args.skip_fetch, args.no_save, args.once,
-    )
-    sys_logger.info("═" * 60)
-
     try:
         rt = build_runtime(
             model_buy_path=args.model_buy,
@@ -933,6 +936,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception as exc:
         sys_logger.exception(f"[main] build_runtime failed: {exc}")
         return 2
+
+    # ── Display Banner (ดึงทุนจริงจาก DB ถ้ามี) ──────────────────
+    current_cash = INITIAL_CAPITAL_THB
+    if rt.database is not None:
+        try:
+            portfolio = rt.database.get_portfolio()
+            current_cash = float(portfolio.get("cash_balance", INITIAL_CAPITAL_THB))
+        except Exception:
+            pass
+
+    sys_logger.info("═" * 60)
+    sys_logger.info("  ⛏️  นักขุดทอง v2.1  —  XGBoost Gold Signal Loop")
+    sys_logger.info("─" * 60)
+    sys_logger.info("  💰 capital    ฿%s", f"{current_cash:,.2f}")
+    sys_logger.info("  ⏱  interval   %ss", args.interval)
+    sys_logger.info("  🤖 model_buy  %s", args.model_buy)
+    sys_logger.info("  🤖 model_sell %s", args.model_sell)
+    sys_logger.info("  📐 features   %s", args.feature_schema)
+    sys_logger.info(
+        "  🔧 flags      skip_fetch=%s  no_save=%s  once=%s",
+        args.skip_fetch, args.no_save, args.once,
+    )
+    sys_logger.info("═" * 60)
 
     try:
         main_loop(

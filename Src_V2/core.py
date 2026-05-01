@@ -71,6 +71,10 @@ class Decision:
     take_profit: Optional[float] = None
     position_size_thb: float = 0.0
 
+    # [v4.1] TP/SL ราคา THB/gram สำหรับอัปเดตลงฐานข้อมูล (Gate 0b)
+    take_profit_price: Optional[float] = None
+    stop_loss_price:   Optional[float] = None
+
     rationale: str = ""
     reject_reason: Optional[str] = None
     notify: bool = False                        # True เฉพาะ ALL PASS
@@ -92,6 +96,9 @@ class Decision:
             "model_signal":  self.model_signal,
             "iterations_used": 0,
             "tool_calls_used": 0,
+            # [v4.1] TP/SL price ต่อไปอัปเดต portfolio DB
+            "take_profit_price": self.take_profit_price,
+            "stop_loss_price":   self.stop_loss_price,
         }
 
 
@@ -199,6 +206,9 @@ class CoreDecision:
             take_profit=risk_payload.get("take_profit"),
             position_size_thb=float(risk_payload.get("position_size_thb", 0.0) or 0.0),
             rationale=risk_payload.get("rationale") or rationale,
+            # [v4.1] TP/SL price สำหรับอัปเดต portfolio DB
+            take_profit_price=risk_payload.get("take_profit_price"),
+            stop_loss_price=risk_payload.get("stop_loss_price"),
             reject_reason=None,
             notify=True,
             session_info=(session_res.payload or {}),

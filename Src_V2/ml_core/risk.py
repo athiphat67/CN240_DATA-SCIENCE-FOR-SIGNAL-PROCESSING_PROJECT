@@ -162,6 +162,13 @@ class RiskManager:
                 else:
                     logger.debug(f"[TrailingSL] Waiting: price ฿{check_price:,.0f} < activation ฿{activation_price:,.0f}")
 
+            # [v4.1] ดึง TP/SL จาก portfolio DB (ค่าเหล่านี้ถูกบันทึกตอน BUY ไว้แล้ว)
+            tp_price = float(portfolio.get("take_profit_price") or 0.0)
+            base_sl  = float(portfolio.get("stop_loss_price")   or 0.0)
+
+            if self._active_trailing_sl == 0.0:
+                self._active_trailing_sl = base_sl
+
             override_reason = None
             if tp_price > 0 and check_price >= tp_price:
                 override_reason = f"TP hit: ฿{check_price:,.0f}"
@@ -330,8 +337,9 @@ class RiskManager:
             final_decision["position_size_thb"]  = round(investment_thb, 2)
             final_decision["stop_loss"]          = round(buy_price_thb - sl_distance, 2)
             final_decision["take_profit"]        = round(buy_price_thb + tp_distance, 2)
-            
-            pass
+            # [v4.1] แนบ TP/SL ไว้ใน final_decision เพื่อให้ main.py นำไปอัปเดต portfolio DB
+            final_decision["take_profit_price"]  = round(buy_price_thb + tp_distance, 2)
+            final_decision["stop_loss_price"]    = round(buy_price_thb - sl_distance, 2)
 
             # [V5] บันทึก entry state สำหรับ trailing stop activation
             self._active_trailing_sl = 0.0
@@ -396,8 +404,10 @@ class RiskManager:
             
             final_decision["entry_price"]       = sell_price_thb
             final_decision["position_size_thb"] = round(gold_value_thb, 2)
-
-            pass
+            # [v4.1] เคลียร์ TP/SL price เมื่อ SELL เพื่อให้ main.py
+            # อัปเดตลงฐานข้อมูลให้เป็น None (รีเซ็ตสถานะ)
+            final_decision["take_profit_price"] = None
+            final_decision["stop_loss_price"]   = None
 
             logger.info(f"RiskManager Approved SELL: {gold_value_thb:.2f} THB")
             return final_decision
