@@ -100,7 +100,50 @@ class GoldTradingOrchestrator:
 
         logger.error("MTS latest price unexpected status '%s': %s", status, payload)
         return None
+    def _fetch_yfinance_thai_price(self) -> float :
+        try:
+            import yfinance as yf
 
+            # ── Gold Spot (XAU/USD) ──
+            gc = yf.Ticker("GC=F")
+            spot_usd = gc.fast_info.get("lastPrice", 0)
+            if not spot_usd or spot_usd <= 0:
+                # fallback: ดึงจาก history ถ้า fast_info ไม่มี
+                hist = gc.history(period="1d", interval="1m")
+                if hist.empty:
+                    logger.warning("[YFinance Fallback] ไม่มีข้อมูล Gold Spot")
+                    return None
+                spot_usd = float(hist["Close"].iloc[-1])
+
+            # ── USD/THB ──
+            fx = yf.Ticker("USDTHB=X")
+            usd_thb = fx.fast_info.get("lastPrice", 0)
+            if not usd_thb or usd_thb <= 0:
+                hist_fx = fx.history(period="1d", interval="1m")
+                if hist_fx.empty:
+                    logger.warning("[YFinance Fallback] ไม่มีข้อมูล USD/THB")
+                    return None
+                usd_thb = float(hist_fx["Close"].iloc[-1])
+
+            # ── คำนวณราคาทองไทย (สูตรเดียวกับ fetcher.py) ──
+            TROY_OUNCE_IN_GRAMS = 31.1034768
+            THAI_GOLD_BAHT_IN_GRAMS = 15.244
+            THAI_GOLD_PURITY = 0.965
+
+            price_thb_per_gram = (spot_usd * usd_thb) / TROY_OUNCE_IN_GRAMS
+            price_thb_per_baht = price_thb_per_gram * THAI_GOLD_BAHT_IN_GRAMS * THAI_GOLD_PURITY
+            sell_price = round((price_thb_per_baht + 50) / 50) * 50
+
+            logger.info(
+                f"[YFinance Fallback] Spot=${spot_usd:.2f}, "
+                f"USD/THB={usd_thb:.4f} → sell≈฿{sell_price:,.0f}"
+            )
+            return float(sell_price)
+
+        except Exception as e:
+            logger.error(f"[YFinance Fallback] คำนวณราคาไทยล้มเหลว: {e}")
+            return None
+        
     def run(self, save_to_file=True, history_days=None, interval=None, recent_trades=None) -> dict:
         effective_days = history_days or self.history_days
         effective_interval = interval or self.interval
@@ -261,17 +304,42 @@ class GoldTradingOrchestrator:
         # TODO: trend_signal reserved for future multi-signal aggregation
 
         # ── Primary price source: MTS API → fallback to Interceptor ────────────
+        # Layer 1: MTS API (real-time, ข้อมูลตรงจากแม่ทองสุก)
         mts_price = self._fetch_mts_latest_price()
         if mts_price is not None:
             thai["sell_price_thb"] = float(mts_price)
             dq["source"] = "MTS_API"
-            logger.info(f"[Orchestrator] Primary price source: MTS_API ({mts_price})")
+            logger.info(f"[Orchestrator] ✅ Layer 1 (MTS_API): ฿{mts_price:,.0f}")
         else:
-            dq["source"] = "INTERCEPTOR_FALLBACK"
-            logger.warning(
-                "[Orchestrator] MTS API returned None — falling back to "
-                f"Interceptor price ({thai.get('sell_price_thb')})"
-            )
+            logger.warning("[Orchestrator] ❌ Layer 1 (MTS_API) ล้มเหลว → ลอง Layer 2")
+            yf_price = self._fetch_yfinance_thai_price()
+            if yf_price is not None:
+                thai["sell_price_thb"] = float(yf_price)
+                dq["source"] = "YFINANCE_CALCULATED"
+                logger.warning(f"[Orchestrator] ⚠️ Layer 2 (YFinance Calculated): ฿{yf_price:,.0f}")
+            else:
+                logger.warning("[Orchestrator] ❌ Layer 2 (YFinance) ล้มเหลว → ใช้ Layer 3")
+                interceptor_price = thai.get("sell_price_thb")
+                if interceptor_price:
+                    dq["source"] = "INTERCEPTOR_STALE"
+                    logger.warning(
+                        f"[Orchestrator] ⚠️ Layer 3 (Interceptor Stale): ฿{interceptor_price:,.0f} "
+                        "(ราคาอาจไม่ใช่ล่าสุด)"
+                    )
+                else:                             
+                    dq["source"] = "NO_PRICE_SOURCE"
+                    logger.error("[Orchestrator] 🚨 ไม่มีราคาจากทุก Layer — ข้อมูลไม่น่าเชื่อถือ")
+        # mts_price = self._fetch_mts_latest_price()
+        # if mts_price is not None:
+        #     thai["sell_price_thb"] = float(mts_price)
+        #     dq["source"] = "MTS_API"
+        #     logger.info(f"[Orchestrator] Primary price source: MTS_API ({mts_price})")
+        # else:
+        #     dq["source"] = "INTERCEPTOR_FALLBACK"
+        #     logger.warning(
+        #         "[Orchestrator] MTS API returned None — falling back to "
+        #         f"Interceptor price ({thai.get('sell_price_thb')})"
+        #     )
 
         # ── thai_gold_thb: เพิ่ม mid_price + timestamp ─────────────────────────
         sell = thai.get("sell_price_thb", 0)
