@@ -100,8 +100,19 @@ class RiskManager:
 
         try:
             thai_gold      = market_state["market_data"]["thai_gold_thb"]
-            buy_price_thb  = float(thai_gold["sell_price_thb"])
-            sell_price_thb = float(thai_gold["buy_price_thb"])
+            raw_buy_execution_thb  = float(thai_gold["sell_price_thb"])
+            raw_sell_execution_thb = float(thai_gold["buy_price_thb"])
+            price_unit = str(thai_gold.get("unit", ""))
+            if price_unit == "THB_PER_BAHT_GOLD":
+                buy_price_thb = raw_buy_execution_thb / GRAMS_PER_BAHT_WEIGHT
+                sell_price_thb = raw_sell_execution_thb / GRAMS_PER_BAHT_WEIGHT
+                edge_price_thb = raw_buy_execution_thb
+                edge_spread_thb = max(0.0, raw_buy_execution_thb - raw_sell_execution_thb)
+            else:
+                buy_price_thb = raw_buy_execution_thb
+                sell_price_thb = raw_sell_execution_thb
+                edge_price_thb = buy_price_thb
+                edge_spread_thb = max(0.0, buy_price_thb - sell_price_thb)
             atr_value      = float(
                 market_state.get("technical_indicators", {})
                             .get("atr", {})
@@ -354,7 +365,7 @@ class RiskManager:
             ):
                 return self._reject_signal(final_decision, f"HTF bearish ({htf.get('trend')}) — BUY ต้อง conf >= 0.67")
 
-            spread_thb = max(0.0, buy_price_thb - sell_price_thb)
+            spread_thb = edge_spread_thb
             market_data = market_state.get("market_data", {})
             spread_cov = market_data.get("spread_coverage", {}) if isinstance(market_data, dict) else {}
             expected_move_thb = float(spread_cov.get("expected_move_thb", 0.0) or 0.0)
@@ -371,7 +382,7 @@ class RiskManager:
                     expected_move_thb = _atr_fallback
                 else:
                     trend_pct = abs(float((market_data.get("price_trend", {}) or {}).get("change_pct", 0.0) or 0.0))
-                    expected_move_thb = buy_price_thb * (trend_pct / 100.0)
+                    expected_move_thb = edge_price_thb * (trend_pct / 100.0)
                 edge_score = expected_move_thb / effective_spread if effective_spread > 0 else 0.0
                 logger.debug("[RiskManager] fallback edge recalc: atr=%.0f expected=%.2f edge=%.4f",
                              _atr_fallback, expected_move_thb, edge_score)

@@ -469,6 +469,18 @@ class PromptBuilder:
                 lines.append(f"{i}. {name}")
         return "\n".join(lines)
 
+    def _format_hsh_price(self, value) -> str:
+        try:
+            return f"฿{float(value):,.2f}/baht-gold"
+        except (TypeError, ValueError):
+            return "N/A"
+
+    def _format_usd_price(self, value) -> str:
+        try:
+            return f"${float(value):,.2f}"
+        except (TypeError, ValueError):
+            return f"${value}"
+
     def _format_market_state(self, state: dict, iteration: int = 1) -> str:
         """Format market state for LLM — dynamically slims down in later iterations"""
         md   = state.get("market_data", {})
@@ -481,12 +493,48 @@ class PromptBuilder:
         spread_cov = md.get("spread_coverage", {})
         sell_thb = thai.get("sell_price_thb", "N/A")
         buy_thb  = thai.get("buy_price_thb", "N/A")
+        thai_unit = thai.get("unit")
+        buy_exec_display = sell_thb
+        sell_exec_display = buy_thb
+        hsh_price_unit = (
+            thai_unit == "THB_PER_BAHT_GOLD"
+            or ti.get("price_unit") == "THB_PER_BAHT_GOLD"
+            or (ti.get("atr", {}) or {}).get("unit") == "THB_PER_BAHT_GOLD"
+        )
+        if thai_unit == "THB_PER_BAHT_GOLD":
+            try:
+                buy_exec_display = f"{float(sell_thb) / 15.244:,.2f}"
+                sell_exec_display = f"{float(buy_thb) / 15.244:,.2f}"
+            except (TypeError, ValueError):
+                buy_exec_display = sell_thb
+                sell_exec_display = buy_thb
 
         rsi   = ti.get("rsi", {})
         macd  = ti.get("macd", {})
         trend = ti.get("trend", {})
         bb    = ti.get("bollinger", {})
         atr   = ti.get("atr", {})
+        if hsh_price_unit:
+            trend_line = (
+                f"Trend: EMA20={self._format_hsh_price(trend.get('ema_20'))} "
+                f"EMA50={self._format_hsh_price(trend.get('ema_50'))}"
+                f"[{trend.get('trend', 'N/A')}]"
+            )
+            bb_line = (
+                f"BB up/low: {self._format_hsh_price(bb.get('upper'))} / "
+                f"{self._format_hsh_price(bb.get('lower'))} | "
+                f"Close mid: {self._format_hsh_price(ti.get('latest_close'))} | "
+                f"ATR: {atr.get('value', 'N/A')} THB_PER_BAHT_GOLD"
+            )
+        else:
+            trend_line = (
+                f"Trend: EMA20={trend.get('ema_20', 'N/A')} "
+                f"EMA50={trend.get('ema_50', 'N/A')}[{trend.get('trend', 'N/A')}]"
+            )
+            bb_line = (
+                f"BB: up={bb.get('upper', 'N/A')} low={bb.get('lower', 'N/A')} | "
+                f"Close: ${ti.get('latest_close', 'N/A')} | ATR: {atr.get('value', 'N/A')} THB"
+            )
 
         timestamp_str = state.get("timestamp") or md.get("spot_price_usd", {}).get("timestamp", "")
         interval      = state.get("interval", "15m")
@@ -514,11 +562,11 @@ class PromptBuilder:
         # ── 1. แกนหลัก (ส่งทุกรอบเพราะต้องใช้อ้างอิงราคา Real-time) ──
         lines =[
             f"Time: {timestamp_str} ({time_part}) | Int: {interval}{dead_zone_warning}",
-            f"Gold: ${spot}/oz | USD/THB: {usd_thb} | THB/g: ฿{sell_thb} sell / ฿{buy_thb} buy",
+            f"Gold: ${spot}/oz | USD/THB: {usd_thb} | BUY ask: ฿{buy_exec_display}/g | SELL bid: ฿{sell_exec_display}/g",
             f"Spread: {spread_cov.get('spread_thb', 'N/A')} THB | Expected Move: {spread_cov.get('expected_move_thb', 'N/A')} THB | edge_score: {spread_cov.get('edge_score', 'N/A')}",
             f"RSI({rsi.get('period', 14)}): {rsi.get('value', 'N/A')} | MACD: {macd.get('macd_line', 'N/A')}/{macd.get('signal_line', 'N/A')} hist:{macd.get('histogram', 'N/A')}",
-            f"Trend: EMA20={trend.get('ema_20', 'N/A')} EMA50={trend.get('ema_50', 'N/A')}[{trend.get('trend', 'N/A')}]",
-            f"BB: up={bb.get('upper', 'N/A')} low={bb.get('lower', 'N/A')} | Close: ${ti.get('latest_close', 'N/A')} | ATR: {atr.get('value', 'N/A')} THB",
+            trend_line,
+            bb_line,
         ]
 
         emergency_directive = self._build_emergency_directive(state.get("session_gate"))
@@ -724,11 +772,25 @@ class PromptBuilder:
 
             price_trend = md.get("price_trend", {})
             if price_trend:
+                if hsh_price_unit:
+                    current_trend = self._format_hsh_price(
+                        price_trend.get("current_close_thb")
+                    )
+                    prev_trend = self._format_hsh_price(
+                        price_trend.get("prev_close_thb")
+                    )
+                    change_label = "Change"
+                    change_value = price_trend.get("change_pct", "N/A")
+                else:
+                    current_trend = f"${price_trend.get('current_close_usd', 'N/A')}"
+                    prev_trend = f"${price_trend.get('prev_close_usd', 'N/A')}"
+                    change_label = "Daily chg"
+                    change_value = price_trend.get("daily_change_pct", "N/A")
                 lines += [
                     "",
                     "── Price Trend ──",
-                    f"  Current: ${price_trend.get('current_close_usd', 'N/A')} | Prev: ${price_trend.get('prev_close_usd', 'N/A')}",
-                    f"  Daily chg: {price_trend.get('daily_change_pct', 'N/A')}%",
+                    f"  Current: {current_trend} | Prev: {prev_trend}",
+                    f"  {change_label}: {change_value}%",
                 ]
                 if "5d_change_pct" in price_trend:
                     lines.append(f"  5d chg: {price_trend['5d_change_pct']}%")
@@ -753,8 +815,19 @@ class PromptBuilder:
         
         # ── 3. ซ่อนข้อมูลยืดเยื้อใน Iteration ถัดไป ──
         else:
+            if hsh_price_unit:
+                compact_price_line = (
+                    f"Timestamp: {timestamp_str} | BUY ask: ฿{buy_exec_display}/g | "
+                    f"SELL bid: ฿{sell_exec_display}/g | "
+                    f"Close mid: {self._format_hsh_price(ti.get('latest_close'))}"
+                )
+            else:
+                compact_price_line = (
+                    f"Timestamp: {timestamp_str} | Price: ฿{sell_thb} sell / ฿{buy_thb} buy | "
+                    f"Close: ${ti.get('latest_close','N/A')}/oz"
+                )
             lines = [
-                f"Timestamp: {timestamp_str} | Price: ฿{sell_thb} sell / ฿{buy_thb} buy | Close: ${ti.get('latest_close','N/A')}/oz",
+                compact_price_line,
             ]
             if directive:
                 lines += ["── DIRECTIVE ──", directive, "────────────────"]

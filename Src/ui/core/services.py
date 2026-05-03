@@ -377,6 +377,22 @@ class AnalysisService:
                 if not market_state or "market_data" not in market_state:
                     raise ValueError("Failed to fetch market data")
 
+                data_quality = market_state.get("data_quality", {}) or {}
+                if (
+                    data_quality.get("source") == "supabase_hsh_ig"
+                    and (
+                        data_quality.get("status") != "ok"
+                        or bool(data_quality.get("stale", False))
+                    )
+                ):
+                    raise ValueError(
+                        "Supabase HSH/IG market data not usable: "
+                        f"status={data_quality.get('status')} "
+                        f"stale={data_quality.get('stale')} "
+                        f"age_seconds={data_quality.get('age_seconds')} "
+                        f"warnings={data_quality.get('warnings', [])}"
+                    )
+
                 sys_logger.info("Market data fetched successfully")
                 
                 sys_logger.info("Starting Async Pre-fetch for Tools...")
@@ -860,6 +876,13 @@ class AnalysisService:
             try:
                 _ti        = market_state.get("technical_indicators", {})
                 _atr_node  = _ti.get("atr", {})
+                _atr_unit   = str(_atr_node.get("unit", ""))
+                if _atr_unit == "THB_PER_BAHT_GOLD":
+                    sys_logger.info(
+                        f"[{interval}] ATR already in THB_PER_BAHT_GOLD; "
+                        "skipping USD/oz conversion"
+                    )
+                    raise StopIteration
                 _atr_usd   = float(_atr_node.get("value", 0))
                 _usd_thb   = float(
                     market_state.get("market_data", {})
@@ -907,6 +930,8 @@ class AnalysisService:
                 # print(f"  atr/spot ratio      = {_atr_usd/_spot if _spot else 'DIV/0'}")
                 # print("="*60 + "\n")
 
+            except StopIteration:
+                pass
             except Exception as _atr_err:
                 sys_logger.warning(
                     f"[{interval}] ATR conversion failed: {_atr_err} "

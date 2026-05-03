@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 import time
 from pathlib import Path
 import pandas as pd
 import requests
+from data_engine.hsh_supabase_provider import HshSupabaseMarketDataProvider
 from data_engine.tools.tool_registry import call_tool
 from data_engine.tools.schema_validator import validate_market_state
 from data_engine.tools.interceptor_manager import start_interceptor_background
@@ -20,10 +22,19 @@ _WEEKEND_INSTRUCTION = (
 
 class GoldTradingOrchestrator:
     def __init__(
-        self, history_days=90, interval="5m", max_news_per_cat=5, output_dir=None
+        self,
+        history_days=90,
+        interval="5m",
+        max_news_per_cat=5,
+        output_dir=None,
+        market_data_source=None,
     ):
-        start_interceptor_background()
-
+        self.market_data_source = (
+            market_data_source
+            or os.getenv("MARKET_DATA_SOURCE", "supabase_hsh_ig")
+        )
+        if self.market_data_source != "supabase_hsh_ig":
+            start_interceptor_background()
         self.history_days = history_days
         self.interval = interval
         self.max_news_per_cat = max_news_per_cat
@@ -82,6 +93,15 @@ class GoldTradingOrchestrator:
     def run(self, save_to_file=True, history_days=None, interval=None, recent_trades=None) -> dict:
         effective_days = history_days or self.history_days
         effective_interval = interval or self.interval
+
+        if self.market_data_source == "supabase_hsh_ig":
+            provider = HshSupabaseMarketDataProvider()
+            payload = provider.build_market_state(interval=effective_interval)
+            if save_to_file:
+                save_payload = dict(payload)
+                save_payload.pop("_raw_ohlcv", None)
+                self._save(save_payload)
+            return payload
 
         # ── Step 1: fetch_price (ซึ่งข้างในเรียก fetch_all ที่เราทำ Stitching ไว้แล้ว) ──
         price_result = call_tool(
