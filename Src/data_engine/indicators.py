@@ -90,6 +90,7 @@ class TechnicalIndicators:
         self.close = self.df["close"]
         self.high = self.df["high"]
         self.low = self.df["low"]
+        self.open_ = self.df["open"]
         self.usd_thb = usd_thb  # Optional: ถ้าส่งมา atr() จะ convert เป็น THB ให้อัตโนมัติ
 
         # คำนวณ vectorized ล่วงหน้าทั้งหมด
@@ -143,6 +144,7 @@ class TechnicalIndicators:
 
         # Trend: EMA20, EMA50, EMA200
         self.df["ema_20"] = close.ewm(span=20, adjust=False).mean()
+        self.df["ema_21"]  = close.ewm(span=21, adjust=False).mean()   # ← ใหม่สำหรับ ML
         self.df["ema_50"] = close.ewm(span=50, adjust=False).mean()
         self.df["ema_200"] = close.ewm(span=200, adjust=False).mean()
 
@@ -217,9 +219,15 @@ class TechnicalIndicators:
         atr_sma = self.df["atr_14"].rolling(50).mean()
         avg_val = float(atr_sma.iloc[-1]) if len(atr_sma.dropna()) > 0 else val
 
-        if val < avg_val * 0.8:
+        # บังคับค่า ATR ขั้นต่ำที่ 1.0 USD เพื่อให้ระบบมองเห็นระยะวิ่งพื้นฐาน
+        # ช่วยให้ AI ไม่สั่ง HOLD ทันทีในช่วงที่ตลาดนิ่ง
+        val = max(val, 1.0)
+        
+        ratio = val / avg_val if avg_val > 0 else 1.0
+        
+        if ratio < 0.8:
             vol_level = "low"
-        elif val > avg_val * 1.5:
+        elif ratio > 1.5:
             vol_level = "high"
         else:
             vol_level = "normal"
@@ -234,7 +242,28 @@ class TechnicalIndicators:
         else:
             unit = "USD_PER_OZ"
 
-        return ATRResult(value=round(val, 2), period=14, volatility_level=vol_level, unit=unit)
+        # # ── 🔥 Smooth Boost (สำคัญสุด) ─────────────────────
+        # # จำกัด ratio ให้อยู่ในช่วงสมเหตุสมผล
+        # ratio_clamped = max(0.5, min(ratio, 2.0))
+
+        # # smooth scaling (ไม่มี step jump)
+        # boost = 1.2 + (ratio_clamped * 0.4)   # จะได้ประมาณ 1.4 → 2.0
+        # val *= boost
+
+        # # ── 🔥 Floor (กัน edge = 0) ───────────────────────
+        # if unit == "THB_PER_BAHT_GOLD":
+        #     min_floor = 12   # ปรับได้ตาม spread จริง (10–15 แนะนำ)
+        # else:
+        #     min_floor = 0.3
+
+        # val = max(val, min_floor)
+
+        return ATRResult(
+            value=round(val, 2),
+            period=14,
+            volatility_level=vol_level,
+            unit=unit
+        )
 
     def trend(self) -> TrendResult:
         e20 = float(self.df["ema_20"].iloc[-1])
