@@ -20,8 +20,9 @@ except ImportError:
 
 DEFAULT_TZ = "Asia/Bangkok"
 URGENT_MINUTES_DEFAULT = 15
-EMERGENCY_BUY_MINUTES = 20
-EMERGENCY_SELL_MINUTES = 5
+EMERGENCY_BUY_MINUTES = 30
+EMERGENCY_BUY_MAX_TRADES_THIS_SESSION = 1
+EMERGENCY_SELL_MINUTES = 8
 
 # วันจันทร์=0 ... อาทิตย์=6
 _WEEKEND_DAYS = {5, 6}
@@ -256,7 +257,7 @@ def attach_session_gate_to_market_state(
             not is_emergency_sell
             and mins_left is not None
             and mins_left <= EMERGENCY_BUY_MINUTES
-            and int(trades_this_session or 0) == 0
+            and int(trades_this_session or 0) <= EMERGENCY_BUY_MAX_TRADES_THIS_SESSION
             and held_gold <= 1e-4
         )
 
