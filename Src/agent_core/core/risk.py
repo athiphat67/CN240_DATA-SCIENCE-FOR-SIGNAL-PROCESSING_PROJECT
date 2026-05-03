@@ -32,9 +32,7 @@ class RiskManager:
         micro_port_threshold: float = 2000.0,
         max_daily_loss_thb: float = 500.0,
         max_trade_risk_pct: float = 0.20,         # [V5] 1.00 → 0.20 (ลด exposure ต่อ trade)
-        session_end_force_sell_minutes: int = 5,  # Emergency Session Mode: clear inventory in final 5 minutes
-        session_end_force_buy_minutes: int = 20,  # [NEW] ถ้า trades ยังไม่ครบ → บังคับหา entry ก่อนหมด session
-        min_trades_per_session: int = 3,          # [NEW] ขั้นต่ำต่อ session — ถ้าไม่ถึงจะ trigger force buy
+        min_trades_per_session: int = 3,          # Compatibility only; SessionGate owns emergency decisions
         enable_trailing_stop: bool = True,
     ):
         self.atr_multiplier                  = atr_multiplier
@@ -45,8 +43,6 @@ class RiskManager:
         self.micro_port_threshold            = micro_port_threshold
         self.max_daily_loss_thb              = max_daily_loss_thb
         self.max_trade_risk_pct              = max_trade_risk_pct
-        self.session_end_force_sell_minutes  = session_end_force_sell_minutes
-        self.session_end_force_buy_minutes   = session_end_force_buy_minutes
         self.min_trades_per_session          = min_trades_per_session
         self.enable_trailing_stop            = enable_trailing_stop
 
@@ -118,11 +114,7 @@ class RiskManager:
         session_gate = market_state.get("session_gate", {})
         mins_left = session_gate.get("minutes_to_session_end")
         trades_this_session = int(session_gate.get("trades_this_session", 0) or 0)
-        _force_sell_active = bool(session_gate.get("is_emergency_sell")) or (
-            gold_grams > 1e-4
-            and mins_left is not None
-            and mins_left <= self.session_end_force_sell_minutes
-        )
+        _force_sell_active = bool(session_gate.get("is_emergency_sell"))
 
         logger.debug(
             "[SessionGate keys] %s", list(session_gate.keys())
@@ -147,22 +139,15 @@ class RiskManager:
             signal = "SELL"
             self._reset_trailing_state()
             logger.warning(
-                "[RiskManager] Gate 0c SESSION FORCE SELL — %d min left (threshold=%d)",
-                mins_left, self.session_end_force_sell_minutes,
+                "[RiskManager] Gate 0c SESSION FORCE SELL — %s min left",
+                mins_left,
             )
 
         # ================================================================
         # Gate 0d — Session End Force BUY hint [NEW]
-        # ถ้ายังไม่มีทอง + trades ยังไม่ครบ quota + เวลาใกล้หมด → ลด threshold
+        # SessionGate is the single source of truth for emergency BUY mode.
         # ================================================================
-        _force_buy_active = signal != "SELL" and (
-            bool(session_gate.get("is_emergency_buy")) or (
-                gold_grams <= 1e-4
-                and mins_left is not None
-                and mins_left <= self.session_end_force_buy_minutes
-                and trades_this_session == 0
-            )
-        )
+        _force_buy_active = signal != "SELL" and bool(session_gate.get("is_emergency_buy"))
         if _force_buy_active:
             logger.warning(
                 "[RiskManager] Gate 0d EMERGENCY FORCE BUY MODE — %s min left, trades=%d",
