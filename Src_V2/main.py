@@ -483,6 +483,12 @@ def _restore_trailing_stop(risk_manager: RiskManager, portfolio: PortfolioDict) 
             )
             risk_manager._active_trailing_sl = level  # type: ignore[attr-defined]
             sys_logger.info(f"[trailing_stop] Restored via fallback: ฿{level:,.0f}")
+    except Exception as exc:
+        sys_logger.error(f"[trailing_stop] restore failed: {exc}")
+
+
+def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
+    cycle_start = time.perf_counter()
 
     # ── 1. Data Engine ─────────────────────────────────────────
     sys_logger.info("🟢[cycle] (1/5) fetching market_state via orchestrator")
@@ -522,24 +528,7 @@ def _restore_trailing_stop(risk_manager: RiskManager, portfolio: PortfolioDict) 
     # ── 2. Feature extraction (26-dim, v2 schema) ──────────────
     sys_logger.info("🟢[cycle] (2/5) extracting 26-dim feature vector (v2)")
     try:
-        # ดึงค่าจาก public property ก่อน ถ้ายังไม่มีให้ fallback private attr
-        if hasattr(risk_manager, "active_trailing_stop"):
-            current_level: Optional[float] = risk_manager.active_trailing_stop
-        else:
-            current_level = getattr(risk_manager, "_active_trailing_sl", None)
-
-        if current_level is None:
-            return
-
-        database.update_trailing_stop(trailing_stop_level_thb=float(current_level))
-        sys_logger.debug(f"[trailing_stop] Flushed to DB: ฿{current_level:,.0f}")
-
-    except AttributeError as exc:
-        # update_trailing_stop() อาจยังไม่มีใน RunDatabase รุ่นเก่า
-        sys_logger.warning(
-            f"[trailing_stop] DB method update_trailing_stop() not found ({exc}). "
-            "กรุณาเพิ่ม method นี้ใน RunDatabase เพื่อป้องกัน trailing stop drift"
-        )
+        feature_dict = get_xgboost_feature_v2(market_state)
     except Exception as exc:
         sys_logger.exception(f"🔴[cycle] feature extraction failed: {exc}")
         return Decision(
@@ -549,34 +538,7 @@ def _restore_trailing_stop(risk_manager: RiskManager, portfolio: PortfolioDict) 
             reject_reason=f"feature_error:{exc}",
             notify=False,
         )
-        return unrealized
 
-    except Exception as exc:
-        sys_logger.error(f"[unrealized_pnl] calculation failed: {exc}")
-        return 0.0
-
-
-# ─────────────────────────────────────────────────────────────
-# Trade persistence
-# ─────────────────────────────────────────────────────────────
-
-
-def _persist_trade_to_db(
-    rt: Runtime,
-    decision: Decision,
-    market_state: Dict[str, Any],
-    portfolio: PortfolioDict,
-) -> None:
-    """
-    บันทึกการซื้อขายจริงลง DB (portfolio + trade_log)
-
-    เงื่อนไข: final IN ("BUY", "SELL") เท่านั้น
-    ไม่ขึ้นกับ decision.notify เพื่อป้องกันการพลาดบันทึกเมื่อ notification ล้มเหลว
-    """
-    if not rt.save_to_db or rt.database is None:
-        return
-    if decision.final not in ("BUY", "SELL"):
-        return
 
     # ── 3. Dual-model XGBoost prediction → (signal, confidence)
     sys_logger.info("🟢[cycle] (3/5) XGBoost dual-model predict_proba")
@@ -646,31 +608,6 @@ def _persist_trade_to_db(
     return decision
 
 
-def _safe_extract_features(market_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        return get_xgboost_feature_v2(market_state)
-    except Exception as exc:
-        sys_logger.exception(f"[cycle] feature extraction failed: {exc}")
-        return None
-
-
-def _safe_predict(
-    signal_engine: Any,
-    feature_dict: Dict[str, Any],
-    market_state: Dict[str, Any],
-) -> tuple[str, float, float, float]:
-    session_label = _resolve_session_label(market_state)
-    try:
-        out = signal_engine.predict(feature_dict, session=session_label)
-        return (
-            str(getattr(out, "direction", "HOLD")).upper(),
-            float(getattr(out, "confidence", 0.0)),
-            float(getattr(out, "prob_buy", 0.0)),
-            float(getattr(out, "prob_sell", 0.0)),
-        )
-    except Exception as exc:
-        sys_logger.exception(f"[cycle] XGBoost predict failed: {exc}")
-        return "HOLD", 0.0, 0.0, 0.0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -847,18 +784,10 @@ def _notify_if_pass(
                 market_state=market_state,
                 run_id=run_id,
             )
-            time.sleep(backoff)
-        try:
-            ok = notifier.notify(**kwargs)
-            sys_logger.info(f"[notify] {name} sent={ok} (attempt={attempt})")
-            return  # สำเร็จ — ออกทันที
+            sys_logger.info(f"[notify] telegram sent={ok}")
         except Exception as exc:
-            last_exc = exc
-            sys_logger.warning(f"[notify] {name} attempt {attempt} failed: {exc}")
+            sys_logger.error(f"[notify] telegram failed: {exc}")
 
-    sys_logger.error(
-        f"[notify] {name} failed after {_NOTIFY_MAX_RETRIES + 1} attempts: {last_exc}"
-    )
 
 
 def _persist_run(
@@ -951,7 +880,7 @@ def send_trade_log_from_result(
 
 
 # backward-compat alias (Team-Watch_Engine ใช้ชื่อนี้)
-send_trade_log_from_result = _send_trade_log
+_send_trade_log = send_trade_log_from_result
 
 
 # ─────────────────────────────────────────────────────────────
