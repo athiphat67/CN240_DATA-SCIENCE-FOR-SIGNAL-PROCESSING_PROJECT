@@ -47,11 +47,14 @@ import logging
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
-from .indicators import TechnicalIndicators
+from engine.indicators import TechnicalIndicators
 
 logger = logging.getLogger(__name__)
 
 # ─── [P2] Module-level constant ─────────────────────────────────────────────
+# --- Constants สำหรับ Engine ---
+_ENGINE_BARS = 200      # จำนวนแท่งเทียนที่ต้องการดึงมาใช้คำนวณ
+_ENGINE_MIN_BARS = 50  # จำนวนแท่งเทียนขั้นต่ำที่ยอมรับได้ (ถ้าต่ำกว่านี้ Indicator จะไม่แม่นยำ)
 GOLD_BAHT_TO_GRAM: float = 15.244   # 1 บาทน้ำหนัก = 15.244 กรัม
 
 
@@ -155,7 +158,7 @@ class WatcherEngine:
         self._load_trailing_stop_from_portfolio()
 
         # [v3.4] Engine-only OHLCV fetcher: MTS primary → yfinance fallback
-        self._engine_ohlcv = _EngineOHLCVFetcher()
+        # self._engine_ohlcv = _EngineOHLCVFetcher()
 
     # ── Logging ──────────────────────────────────────────────────────────────
 
@@ -206,16 +209,29 @@ class WatcherEngine:
                     self.log("⚠️ Cannot read gold price — skipping cycle", "ERROR")
                     time.sleep(3)
                     continue
+                
+                # 2. ดึงแท่งเทียน MTS ออกมาจาก market_state ตรงๆ
+                # ปกติ Orchestrator จะเก็บไว้ใน market_data -> candles หรือ mts_history
+                mts_candles = market_state.get("market_data", {}).get("candles", [])
 
+                if not mts_candles:
+                    # ถ้า MTS ไม่มี (เช่น วันหยุด) ให้ fallback ไปใช้ _raw_ohlcv (yfinance)
+                    ohlcv_df = market_state.get("_raw_ohlcv")
+                    ohlcv_source = "yfinance"
+                else:
+                    # ถ้ามีข้อมูล MTS ให้แปลงเป็น DataFrame มาใช้งาน
+                    ohlcv_df = pd.DataFrame(mts_candles)
+                    ohlcv_source = "MTS"
+                    
                 # 3. [P0] Trailing Stop ต้องรันก่อน evaluate เสมอ
                 self._manage_trailing_stop(current_price_per_gram)
 
                 # 4. [v3.4] ดึง OHLCV สำหรับ indicator จาก MTS primary → yfinance fallback
                 #    แยกจาก orchestrator เพื่อให้ได้ candles ที่ตรงกับ interval ของ engine
-                ohlcv_df, ohlcv_source = self._engine_ohlcv.fetch(
-                    interval=self.config.interval,
-                    n_bars=_ENGINE_BARS,
-                )
+                # ohlcv_df, ohlcv_source = self.(
+                #     interval=self.config.interval,
+                #     n_bars=_ENGINE_BARS,
+                # )
 
                 if ohlcv_df.empty or len(ohlcv_df) < _ENGINE_MIN_BARS:
                     self.log(
@@ -275,7 +291,13 @@ class WatcherEngine:
 
                 # 6. คำนวณ indicator เพิ่มเติม (ROC, MAD) จาก engine candles
                 closes           = [float(c["close"]) for c in candles]
-                rsi              = ti.get("rsi", {}).get("value", 50.0)
+                rsi_data = ti.get("rsi")
+                if hasattr(rsi_data, "value"):
+                    rsi = rsi_data.value
+                elif isinstance(rsi_data, dict):
+                    rsi = rsi_data.get("value", 50.0)
+                else:
+                    rsi = 50.0
                 roc_now          = self._compute_roc(closes)
                 mad_now, mad_avg = self._compute_mad(closes)
 
@@ -303,6 +325,9 @@ class WatcherEngine:
                     mad_now       = mad_now,
                     mad_avg       = mad_avg,
                 )
+
+                # บันทึก market_state ล่าสุดไว้ให้ emergency path ใช้ได้ (ไม่ดึง API ซ้ำ)
+                self._last_market_state = market_state
 
                 # SL bypass cooldown — ราคา hit SL ต้องปลุก AI ได้เลย
                 is_sl_trigger = self._sl_triggered is not None
@@ -920,6 +945,60 @@ class WatcherEngine:
                     price_thb_per_gram = price_per_gram,
                     reason             = sell_reason,
                 )
+
+                # ── Discord notification (Emergency SELL) ────────────────────
+                # ใช้ข้อมูลที่มีอยู่แล้วทั้งหมด — ไม่ดึง API ซ้ำ
+                try:
+                    from notification.discord_notifier import DiscordNotifier
+
+                    # สร้าง voting_result / interval_results จากข้อมูล emergency ที่มีอยู่
+                    final_decision = full_result.get("final_decision", {})
+                    emergency_confidence = final_decision.get("confidence", 1.0)
+                    emergency_rationale  = final_decision.get("rationale", sl_reason)
+
+                    emergency_voting = {
+                        "final_signal":        "SELL",
+                        "weighted_confidence": emergency_confidence,
+                        "voting_breakdown": {
+                            "SELL": {"count": 1, "weighted_score": emergency_confidence},
+                        },
+                    }
+
+                    # interval_results: 1 interval จาก price ที่มีอยู่
+                    emergency_interval = {
+                        self.config.interval: {
+                            "signal":     "SELL",
+                            "confidence": emergency_confidence,
+                            "rationale":  emergency_rationale,
+                            # entry = price ปัจจุบันที่ SL hit (ราคาที่จะขายจริง)
+                            "entry_price": price_per_gram,
+                            "stop_loss":   None,
+                            "take_profit": None,
+                        }
+                    }
+
+                    # market_state: ใช้ตัวที่ _watcher_loop ดึงมาแล้ว
+                    # แต่ emergency_result ไม่ได้พ่วง market_state มา → ดึงจาก last_market_state
+                    # (ซึ่ง patch ไว้ใน _watcher_loop อยู่แล้ว — ไม่ call API ใหม่)
+                    emergency_market_state = full_result.get("market_state", getattr(self, "_last_market_state", {}))
+
+                    notifier = DiscordNotifier()
+                    sent = notifier.notify(
+                        voting_result    = emergency_voting,
+                        interval_results = emergency_interval,
+                        market_state     = emergency_market_state,
+                        provider         = self.config.provider,
+                        period           = self.config.period,
+                        run_id           = None,
+                    )
+                    if sent:
+                        self.log("📣 Discord notified: Emergency SELL")
+                    else:
+                        self.log(f"⚠️ Discord notify skipped: {notifier.last_error}", "ERROR")
+
+                except Exception as e_disc:
+                    self.log(f"⚠️ Discord notify failed (non-critical): {e_disc}", "ERROR")
+                # ─────────────────────────────────────────────────────────────
 
             except Exception as e:
                 self.log(f"🔥 CRITICAL: _on_ai_decision emergency sell failed: {e}", "ERROR")
