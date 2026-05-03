@@ -50,14 +50,15 @@ def _t(h: int, m: int) -> int:
 #   2. เพิ่ม window 0:00-2:00 เป็น "evening" (วันถัดไปต่อจาก 18:00-23:59)
 #   3. เลื่อน morning start จาก 6:15 → 6:00 ให้ตรง spec
 _WEEKDAY_WINDOWS: tuple[SessionWindow, ...] = (
-    SessionWindow(_t(0, 0),  _t(2, 0),   "evening", "evening", 2),   # ต่อเนื่องจาก evening วันก่อน (FIX: 01:59→02:00)
-    SessionWindow(_t(6, 0),  _t(11, 59), "morning", "morning", 0),
+    SessionWindow(_t(0, 0),  _t(1, 59),  "evening", "evening", 2),
+    SessionWindow(_t(6, 15), _t(11, 59), "morning", "morning", 0),
     SessionWindow(_t(12, 0), _t(17, 59), "noon",    "noon",    1),
     SessionWindow(_t(18, 0), _t(23, 59), "evening", "evening", 2),
 )
 
 # เสาร์–อาทิตย์
 _WEEKEND_WINDOWS: tuple[SessionWindow, ...] = (
+    SessionWindow(_t(0, 0),  _t(1, 59),  "evening", "evening", 2),
     SessionWindow(_t(9, 30), _t(17, 30), "weekend", "weekend", 0),
 )
 
