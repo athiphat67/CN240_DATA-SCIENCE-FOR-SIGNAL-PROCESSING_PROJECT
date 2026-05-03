@@ -257,7 +257,6 @@ class GoldTradingOrchestrator:
             effective_days,
             effective_interval,
             price_trend=price_trend,
-            recent_trades=recent_trades,
             trend_analysis=trend_analysis,
         )
 
@@ -394,20 +393,9 @@ class GoldTradingOrchestrator:
         latest_news = latest_news[:10]
 
         effective_interval = interval or self.interval
-        portfolio = price.get("portfolio", {}) if isinstance(price.get("portfolio", {}), dict) else {}
-        trades_today = int(portfolio.get("trades_today", 0) or 0)
         daily_target_entries = 3  # [FIX v2] 6→3 rounds/day
-        remaining_entries = max(0, daily_target_entries - trades_today)
-        now_hour = get_thai_time().hour
-        # [FIX v2] 3 sessions: morning(0-11)=1, noon(12-17)=2, evening(18-23)=3
-        current_slot = min(3, max(1, (now_hour // 8) + 1)) if now_hour < 18 else 3
-        min_entries_by_now = max(0, current_slot - 1)
-
-        # safety budget ladder (Phase C): late slots require higher confidence
+        
         # [v12] 3 slots: early=0.60, mid=0.63, late=0.67 (ลด ~3% ต่อ slot)
-        slot_conf_ladder = [0.60, 0.63, 0.67]
-        slot_pos_ladder = [1000, 1000, 1000]
-        next_slot_index = min(trades_today, daily_target_entries - 1)
 
         return {
             "meta": {
@@ -443,18 +431,6 @@ class GoldTradingOrchestrator:
                 "latest_news": latest_news,
                 "news_count": len(latest_news),
             },
-            "portfolio": portfolio,
-            "execution_quota": {
-                "daily_target_entries": daily_target_entries,
-                "entries_done": trades_today,
-                "entries_remaining": remaining_entries,
-                "quota_met": trades_today >= daily_target_entries,
-                "current_slot": current_slot,
-                "min_entries_by_now": min_entries_by_now,
-                "required_confidence_for_next_buy": slot_conf_ladder[next_slot_index],
-                "recommended_next_position_thb": slot_pos_ladder[next_slot_index],
-            },
-            "recent_trades": recent_trades or [],
             "trend_analysis": trend_analysis or {},   # [MTF Phase 1] 15m+30m EMA trend
             "interval": effective_interval,  # [FIX B2]
             "timestamp": now_thai,

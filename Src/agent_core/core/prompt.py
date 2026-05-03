@@ -110,7 +110,7 @@ class SkillRegistry:
         return sorted(tools)
 
     def load_from_json(self, filepath: str) -> None:
-        with open(filepath) as f:
+        with open(filepath, 'r', encoding="utf-8") as f:
             data = json.load(f)
         for sd in data.get("skills", []):
             self.register(
@@ -170,7 +170,7 @@ class RoleRegistry:
         return self.roles.get(role)
 
     def load_from_json(self, filepath: str) -> None:
-        with open(filepath) as f:
+        with open(filepath, 'r', encoding="utf-8") as f:
             data = json.load(f)
         for rd in data.get("roles", []):
             role_enum = AIRole(rd["name"])
@@ -236,8 +236,16 @@ class PromptBuilder:
         max_pos = int(role_def.max_position_thb or 1000)
 
         static_text = role_def.system_prompt_static or role_def.system_prompt_template
+        directive = market_state.get("backtest_directive", "")
+        emergency_directive = self._build_emergency_directive(
+            market_state.get("session_gate")
+        )
+        if emergency_directive:
+            directive = (
+                f"{directive}\n\nEMERGENCY SESSION DIRECTIVE\n{emergency_directive}"
+            ).strip()
         dynamic_text = role_def.render_dynamic(
-            directive=market_state.get("backtest_directive", ""),
+            directive=directive,
             session_gate=market_state.get("session_gate"),
             market_state={k: v for k, v in market_state.items()
                           if k not in ("backtest_directive", "session_gate")},
@@ -310,6 +318,13 @@ class PromptBuilder:
                 f"## FINAL_DECISION mandatory – Triple scenario (bull/bear/neutral) then decision.\n"
                 f"HOLD only if confidence<{self.confidence_threshold} or <2 conditions met."
             )
+
+        if self._build_emergency_directive(market_state.get("session_gate")):
+            action_guidance = (
+                f"{action_guidance}\n\n"
+                "EMERGENCY OVERRIDE: Follow the EMERGENCY SESSION DIRECTIVE in MARKET STATE "
+                "before normal confidence, edge, or role preferences."
+            )
         
         if iteration == 1 and not has_pre_fetched:
             tools_section = self._format_available_tools(verbose=True)
@@ -344,6 +359,12 @@ class PromptBuilder:
         role_def = self._require_role()
         max_pos = int(role_def.max_position_thb or 1000)
         system = self._get_system()
+        emergency_rule = ""
+        if self._build_emergency_directive(market_state.get("session_gate")):
+            emergency_rule = (
+                "0. EMERGENCY OVERRIDE: Follow the EMERGENCY SESSION DIRECTIVE in MARKET STATE "
+                "before normal confidence, edge, or role preferences.\n"
+            )
 
         user = textwrap.dedent(f"""
             ### MARKET STATE
@@ -373,6 +394,7 @@ class PromptBuilder:
             }}
 
             CRITICAL RULES:
+            {emergency_rule}
             1. If signal is BUY, position_size_thb MUST be {max_pos}.
             2. Default to HOLD ONLY if: (a) confidence < {self.confidence_threshold}, OR
                (b) fewer than 2 BUY/SELL conditions are met.
@@ -390,6 +412,26 @@ class PromptBuilder:
         if not role_def:
             raise ValueError(f"Role '{self.role}' not registered")
         return role_def
+
+    @staticmethod
+    def _build_emergency_directive(session_gate: dict | None) -> str:
+        if not session_gate or not session_gate.get("apply_gate"):
+            return ""
+
+        mins_left = session_gate.get("minutes_to_session_end")
+        if session_gate.get("is_emergency_sell"):
+            return (
+                f"URGENT: Session ends in {mins_left} mins. "
+                "SELL ALL gold immediately. Profit/Loss is irrelevant. "
+                "Market exit is mandatory."
+            )
+        if session_gate.get("is_emergency_buy"):
+            return (
+                f"URGENT: Session ends in {mins_left} mins. "
+                "Zero trades completed. RELAX all technical gates. "
+                "Find any reasonable support or momentum to ENTER now."
+            )
+        return ""
 
     def _format_available_tools(self, verbose: bool = False) -> str:
         """
@@ -464,6 +506,15 @@ class PromptBuilder:
             f"Trend: EMA20={trend.get('ema_20', 'N/A')} EMA50={trend.get('ema_50', 'N/A')}[{trend.get('trend', 'N/A')}]",
             f"BB: up={bb.get('upper', 'N/A')} low={bb.get('lower', 'N/A')} | Close: ${ti.get('latest_close', 'N/A')} | ATR: {atr.get('value', 'N/A')} THB",
         ]
+
+        emergency_directive = self._build_emergency_directive(state.get("session_gate"))
+        if emergency_directive:
+            lines += [
+                "",
+                "!!! EMERGENCY SESSION DIRECTIVE !!!",
+                emergency_directive,
+                "!!! END EMERGENCY SESSION DIRECTIVE !!!",
+            ]
 
         # ── [MTF Phase 3] Market Regime Analysis (15m/30m) ──
         regime = state.get("market_regime", "UNKNOWN")
@@ -611,7 +662,12 @@ class PromptBuilder:
         portfolio = state.get("portfolio", {})
         tp_price = portfolio.get("take_profit_price")
         sl_price = portfolio.get("stop_loss_price")
-        gold_g   = float(portfolio.get("gold_grams", 0.0))
+        # แก้ไขเป็นบล็อกป้องกัน Error:
+        raw_gold = portfolio.get("gold_grams", 0.0)
+        try:
+            gold_g = float(raw_gold)
+        except (ValueError, TypeError):
+            gold_g = 0.0  # ถ้าแปลงเลขไม่ได้ ให้เซ็ตเป็น 0 ไว้ก่อน
         if gold_g > 0 and (tp_price or sl_price):
             lines += [
                 "",
@@ -635,13 +691,19 @@ class PromptBuilder:
             sg = state.get("session_gate")
             if sg and sg.get("apply_gate"):
                 notes = [f"  • {n}" for n in (sg.get("notes") or [])]
+                context_instruction = (
+                    "Emergency directive overrides normal market-evidence preferences."
+                    if sg.get("emergency_mode")
+                    else "Use as context only; do not override market evidence."
+                )
                 lines += [
                     "",
                     "── Session Context ──",
                     f"session: {sg.get('session_id')}",
                     f"mins_left: {sg.get('minutes_to_session_end')}",
                     f"mode: {sg.get('llm_mode')}",
-                    "Use as context only; do not override market evidence.",
+                    f"emergency_mode: {sg.get('emergency_mode')}",
+                    context_instruction,
                     *notes,
                     "── End Session Context ──",
                 ]

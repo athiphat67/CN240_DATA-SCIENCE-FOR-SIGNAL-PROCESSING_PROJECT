@@ -228,8 +228,13 @@ class TechnicalIndicators:
         # Convert USD/oz → THB ถ้ามี usd_thb ส่งเข้ามา
         # สูตร: atr_thb = atr_usd_per_oz * usd_thb / 31.1035 * 15.244 * 0.965
         # (แปลงเป็น THB ต่อ 1 บาททอง: หาร troy oz, คูณ gram/baht, คูณ purity)
-        if self.usd_thb is not None:
-            val = val * self.usd_thb / 31.1035 * 15.244 * 0.965
+        try:
+            usd_thb = float(self.usd_thb) if self.usd_thb is not None else 0.0
+        except (TypeError, ValueError):
+            usd_thb = 0.0
+
+        if usd_thb > 0:
+            val = val * usd_thb / 31.1035 * 15.244 * 0.965
             unit = "THB_PER_BAHT_GOLD"
         else:
             unit = "USD_PER_OZ"

@@ -10,7 +10,7 @@ Session Gate — ใช้เมื่อรันอยู่ในช่วง
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 try:
@@ -20,6 +20,8 @@ except ImportError:
 
 DEFAULT_TZ = "Asia/Bangkok"
 URGENT_MINUTES_DEFAULT = 15
+EMERGENCY_BUY_MINUTES = 20
+EMERGENCY_SELL_MINUTES = 5
 
 # วันจันทร์=0 ... อาทิตย์=6
 _WEEKEND_DAYS = {5, 6}
@@ -83,6 +85,10 @@ class SessionGateResult:
             "suggested_min_confidence": self.suggested_min_confidence,
             "notes": list(self.notes),
             "trades_this_session": 0,  # ✅ default; inject จริงผ่าน attach_session_gate_to_market_state
+            "is_emergency_buy": False,
+            "is_emergency_sell": False,
+            "emergency_mode": None,
+            "emergency_reason": None,
         }
 
 
@@ -180,14 +186,40 @@ def resolve_session_gate(
     if quota_snapshot:
         notes.append(f"quota_snapshot (informational only): {quota_snapshot!r}")
 
-    # คำนวณ ISO timestamp ของจุดเริ่ม session สำหรับ query DB
-    start_dt = now.replace(
-        hour=win.start_min // 60,
-        minute=win.start_min % 60,
+    # คำนวณ ISO timestamp ของจุดเริ่ม session สำหรับ query DB.
+    # ช่วง 00:00-01:59 เป็น continuation ของ evening session วันก่อนหน้า
+    # จึงต้องนับ trade ตั้งแต่ 18:00 ของวันก่อน ไม่ใช่เริ่มใหม่ที่ 00:00
+    start_anchor = now
+    start_min = win.start_min
+    if win.start_min == 0:
+        prev_anchor = now - timedelta(days=1)
+        prev_windows = (
+            _WEEKEND_WINDOWS
+            if prev_anchor.weekday() in _WEEKEND_DAYS
+            else _WEEKDAY_WINDOWS
+        )
+        prev_win = next(
+            (
+                w for w in prev_windows
+                if w.session_id == win.session_id and w.end_min == _t(23, 59)
+            ),
+            None,
+        )
+        if prev_win is not None:
+            start_anchor = prev_anchor
+            start_min = prev_win.start_min
+
+    start_dt = start_anchor.replace(
+        hour=start_min // 60,
+        minute=start_min % 60,
         second=0,
-        microsecond=0
+        microsecond=0,
     )
-    session_start_iso = start_dt.isoformat(timespec="seconds") + "Z"
+    session_start_iso = (
+        start_dt.astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
 
     return SessionGateResult(
         apply_gate=True,
@@ -206,11 +238,40 @@ def attach_session_gate_to_market_state(
     market_state: dict,
     result: SessionGateResult,
     trades_this_session: int = 0,  # ✅ [FIX Bug 1] inject ค่าจริงจาก portfolio
+    gold_grams: float = 0.0,
 ) -> None:
     """อัปเดต market_state ในก้อนเดียว — ลบ key ถ้าไม่ใช้ gate"""
     if result.apply_gate:
         d = result.to_market_dict()
         d["trades_this_session"] = trades_this_session  # inject ค่าจริง
+        mins_left = d.get("minutes_to_session_end")
+        held_gold = float(gold_grams or 0.0)
+
+        is_emergency_sell = (
+            mins_left is not None
+            and mins_left <= EMERGENCY_SELL_MINUTES
+            and held_gold > 1e-4
+        )
+        is_emergency_buy = (
+            not is_emergency_sell
+            and mins_left is not None
+            and mins_left <= EMERGENCY_BUY_MINUTES
+            and int(trades_this_session or 0) == 0
+            and held_gold <= 1e-4
+        )
+
+        d["is_emergency_buy"] = is_emergency_buy
+        d["is_emergency_sell"] = is_emergency_sell
+        if is_emergency_sell:
+            d["emergency_mode"] = "forced_sell"
+            d["emergency_reason"] = (
+                f"Session ends in {mins_left} mins and portfolio holds {held_gold:.4f}g."
+            )
+        elif is_emergency_buy:
+            d["emergency_mode"] = "forced_buy"
+            d["emergency_reason"] = (
+                f"Session ends in {mins_left} mins and zero trades completed."
+            )
         market_state["session_gate"] = d
     else:
         market_state.pop("session_gate", None)

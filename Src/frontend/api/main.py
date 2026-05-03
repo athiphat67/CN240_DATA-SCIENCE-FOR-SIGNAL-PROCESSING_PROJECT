@@ -155,6 +155,7 @@ def _build_portfolio_payload(result: dict) -> dict:
         "unrealized_pnl": unrealized_pnl,
         "pnl_percent": pnl_percent,
         "trades_today": int(result.get('trades_today', 0)),
+        "trades_this_session": int(result.get('trades_this_session') or 0),
         "total_equity": total_equity,
         "updated_at": result.get("updated_at") or "",
         "trailing_stop_level_thb": (

@@ -26,6 +26,7 @@ def fetch_indicators(
     yf_symbol: str = "GC=F",
     use_cache: bool = True,
     ohlcv_df: pd.DataFrame = None,
+    usd_thb: float = None,
 ) -> dict:
     """
     ดึงข้อมูล OHLCV (ถ้าไม่ได้ส่ง DataFrame มา) แล้วคำนวณ Technical Indicators
@@ -93,7 +94,7 @@ def fetch_indicators(
     # 3. คำนวณ Indicators
     # ──────────────────────────────────────────
     try:
-        calc = TechnicalIndicators(ohlcv_df)
+        calc = TechnicalIndicators(ohlcv_df, usd_thb=usd_thb)
         indicators_dict = calc.to_dict(interval=interval)
 
         if "data_quality" in indicators_dict:

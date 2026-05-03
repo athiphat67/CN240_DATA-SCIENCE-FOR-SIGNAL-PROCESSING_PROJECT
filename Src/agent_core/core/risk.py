@@ -32,7 +32,7 @@ class RiskManager:
         micro_port_threshold: float = 2000.0,
         max_daily_loss_thb: float = 500.0,
         max_trade_risk_pct: float = 0.20,         # [V5] 1.00 → 0.20 (ลด exposure ต่อ trade)
-        session_end_force_sell_minutes: int = 15, # sync กับ urgent_threshold_minutes ใน session_gate
+        session_end_force_sell_minutes: int = 5,  # Emergency Session Mode: clear inventory in final 5 minutes
         session_end_force_buy_minutes: int = 20,  # [NEW] ถ้า trades ยังไม่ครบ → บังคับหา entry ก่อนหมด session
         min_trades_per_session: int = 3,          # [NEW] ขั้นต่ำต่อ session — ถ้าไม่ถึงจะ trigger force buy
         enable_trailing_stop: bool = True,
@@ -118,6 +118,11 @@ class RiskManager:
         session_gate = market_state.get("session_gate", {})
         mins_left = session_gate.get("minutes_to_session_end")
         trades_this_session = int(session_gate.get("trades_this_session", 0) or 0)
+        _force_sell_active = bool(session_gate.get("is_emergency_sell")) or (
+            gold_grams > 1e-4
+            and mins_left is not None
+            and mins_left <= self.session_end_force_sell_minutes
+        )
 
         logger.debug(
             "[SessionGate keys] %s", list(session_gate.keys())
@@ -130,15 +135,14 @@ class RiskManager:
             mins_left,
         )
 
-        if (
-            gold_grams > 1e-4
-            and mins_left is not None
-            and mins_left <= self.session_end_force_sell_minutes
-        ):
+        if _force_sell_active:
             final_decision["signal"]     = "SELL"
             final_decision["confidence"] = 1.0
+            final_decision["entry_price"] = sell_price_thb
+            final_decision["position_size_thb"] = 0.0
             final_decision["rationale"]  = (
-                f"[SESSION FORCE SELL] เหลือ {mins_left} นาที ปิด position ก่อนหมด session"
+                f"[SESSION FORCE SELL] Emergency exit with {mins_left} min left. "
+                "SELL ALL before session end."
             )
             signal = "SELL"
             self._reset_trailing_state()
@@ -151,18 +155,18 @@ class RiskManager:
         # Gate 0d — Session End Force BUY hint [NEW]
         # ถ้ายังไม่มีทอง + trades ยังไม่ครบ quota + เวลาใกล้หมด → ลด threshold
         # ================================================================
-        _force_buy_active = (
-            signal != "SELL"
-            and gold_grams <= 1e-4
-            and mins_left is not None
-            and mins_left <= self.session_end_force_buy_minutes
-            and trades_this_session < self.min_trades_per_session
-            and cash_balance >= self.min_trade_thb
+        _force_buy_active = signal != "SELL" and (
+            bool(session_gate.get("is_emergency_buy")) or (
+                gold_grams <= 1e-4
+                and mins_left is not None
+                and mins_left <= self.session_end_force_buy_minutes
+                and trades_this_session == 0
+            )
         )
         if _force_buy_active:
             logger.warning(
-                "[RiskManager] Gate 0d FORCE BUY MODE — %d min left, trades=%d/%d",
-                mins_left, trades_this_session, self.min_trades_per_session,
+                "[RiskManager] Gate 0d EMERGENCY FORCE BUY MODE — %s min left, trades=%d",
+                mins_left, trades_this_session,
             )
 
         # ================================================================
@@ -223,7 +227,7 @@ class RiskManager:
             session_gate.get("suggested_min_confidence") or self.min_confidence
         )
         effective_min_conf = min(self.min_confidence, session_suggested_conf)
-        is_quota_urgent = bool(session_gate.get("quota_urgent", False))
+        is_quota_urgent = bool(session_gate.get("quota_urgent", False)) or _force_buy_active
 
         # ── [MTF Phase 4] Dynamic Regime-Based Risk Tuning ──────────────────────
         market_regime = str(market_state.get("market_regime", "UNKNOWN")).upper()
@@ -261,7 +265,9 @@ class RiskManager:
         # UNKNOWN → ใช้ค่า default ไม่ปรับ
 
         if signal == "BUY":
-            if final_decision["confidence"] < effective_min_conf:
+            if gold_grams > 1e-4 or holding:
+                return self._reject_signal(final_decision, "Already holding gold")
+            if not _force_buy_active and final_decision["confidence"] < effective_min_conf:
                 return self._reject_signal(
                     final_decision,
                     f"BUY conf ({final_decision['confidence']:.2f}) < {effective_min_conf:.2f} (effective threshold)"
@@ -273,16 +279,18 @@ class RiskManager:
             min_entries_by_now = int(quota.get("min_entries_by_now", 0) or 0)
             required_conf_next = float(quota.get("required_confidence_for_next_buy", self.min_confidence) or self.min_confidence)
 
-            if trades_today < min_entries_by_now and confidence < required_conf_next:
+            if not _force_buy_active and trades_today < min_entries_by_now and confidence < required_conf_next:
                 return self._reject_signal(final_decision, f"ตาม scheduler ยังไม่ทัน และ conf ({confidence:.2f}) < {required_conf_next:.2f}")
 
             execution_check = llm_decision.get("execution_check", {}) or {}
             if execution_check.get("is_spread_covered") is False:
-                return self._reject_signal(final_decision, "LLM ระบุว่ายังไม่ครอบคลุม spread")
+                if not _force_buy_active:
+                    return self._reject_signal(final_decision, "LLM ระบุว่ายังไม่ครอบคลุม spread")
+                logger.warning("[RiskManager] Emergency BUY bypassed LLM spread check")
 
             htf = market_state.get("pre_fetched_tools", {}).get("get_htf_trend", {})
             htf_trend = str(htf.get("trend", "")).lower() if isinstance(htf, dict) else ""
-            if "bear" in htf_trend and confidence < 0.67:
+            if not _force_buy_active and "bear" in htf_trend and confidence < 0.67:
                 return self._reject_signal(final_decision, f"HTF bearish ({htf.get('trend')}) — BUY ต้อง conf >= 0.67")
 
             spread_thb = max(0.0, buy_price_thb - sell_price_thb)
@@ -321,14 +329,14 @@ class RiskManager:
             if not can_trade:
                 return self._reject_signal(final_decision, "เงินคงเหลือต่ำกว่าเกณฑ์ขั้นต่ำ")
 
-            if capital_mode == "critical" and confidence < 0.76:
+            if not _force_buy_active and capital_mode == "critical" and confidence < 0.76:
                 return self._reject_signal(final_decision, "ทุน critical ต้อง BUY conf >= 0.76")
-            if capital_mode == "defensive" and confidence < 0.68:
+            if not _force_buy_active and capital_mode == "defensive" and confidence < 0.68:
                 return self._reject_signal(final_decision, "ทุน defensive ต้อง BUY conf >= 0.68")
             
-            if holding and profiting and confidence < 0.74:
+            if not _force_buy_active and holding and profiting and confidence < 0.74:
                 return self._reject_signal(final_decision, "มีกำไรอยู่แล้ว BUY เพิ่มต้อง conf >= 0.74")
-            if holding and not profiting and confidence < 0.80:
+            if not _force_buy_active and holding and not profiting and confidence < 0.80:
                 return self._reject_signal(final_decision, "มีของขาดทุนอยู่ ไม่ถัวเพิ่มถ้า conf < 0.80")
 
         elif signal == "SELL" and final_decision["confidence"] < self.min_sell_confidence:
@@ -349,12 +357,15 @@ class RiskManager:
         # Gate 3 — Signal Processing & Dynamic Sizing
         # ================================================================
         if signal == "BUY":
+            if gold_grams > 1e-4 or holding:
+                return self._reject_signal(final_decision, "Already holding gold")
+            
             if cash_balance < self.min_trade_thb:
                 return self._reject_signal(final_decision, "Low Cash")
 
             near_end    = session_gate.get("near_session_end", False)
             trades_done = session_gate.get("trades_this_session", 0)
-            is_forced   = near_end and (trades_done < 1)  # [V6] < 2 → < 1 (quota ลดเหลือ 3/วัน)
+            is_forced   = _force_buy_active or (near_end and (trades_done < 1))  # [V6] < 2 → < 1 (quota ลดเหลือ 3/วัน)
 
             # ✅[FIX] นำ Logic การดึง Position Size ของ LLM ที่เคยเป็น Dead Code มารวมไว้ตรงนี้
             llm_suggested_size = float(llm_decision.get("position_size_thb") or 0.0)
