@@ -425,7 +425,21 @@ class PromptBuilder:
                 "SELL ALL gold immediately. Profit/Loss is irrelevant. "
                 "Market exit is mandatory."
             )
-        if session_gate.get("is_emergency_buy"):
+
+        # Progressive emergency BUY directive — stage decides the tone.
+        # Stage 2 ("forced") tells the LLM to enter immediately; Stage 1
+        # ("relaxed") asks for any reasonable setup with relaxed gates.
+        # Legacy callers that only set is_emergency_buy=True (no stage key)
+        # default to the relaxed wording for back-compat.
+        stage = session_gate.get("emergency_buy_stage")
+        if stage == "forced":
+            return (
+                f"URGENT (FORCED): Session ends in {mins_left} mins. "
+                "Zero trades completed. EXECUTE BUY IMMEDIATELY — "
+                "ignore edge score, spread coverage, and HTF trend gates. "
+                "Do not wait for further confirmation."
+            )
+        if stage == "relaxed" or session_gate.get("is_emergency_buy"):
             return (
                 f"URGENT: Session ends in {mins_left} mins. "
                 "Zero trades completed. RELAX all technical gates. "

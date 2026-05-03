@@ -20,8 +20,18 @@ except ImportError:
 
 DEFAULT_TZ = "Asia/Bangkok"
 URGENT_MINUTES_DEFAULT = 15
-EMERGENCY_BUY_MINUTES = 30
-EMERGENCY_BUY_MAX_TRADES_THIS_SESSION = 1
+
+# ── Progressive Emergency Buy Mode ────────────────────────────────────────────
+# Stage 1 (Relaxed):  ≤ 60 min left  → lower confidence/edge thresholds.
+# Stage 2 (Forced):   ≤ 45 min left  → bypass LLM confidence/edge/HTF gates
+#                                       (absolute safety gates still enforced
+#                                       in risk.py: cash, holding, daily loss).
+EMERGENCY_BUY_RELAX_MINUTES = 60
+EMERGENCY_BUY_FORCE_MINUTES = 45
+EMERGENCY_BUY_MAX_TRADES_THIS_SESSION = 0
+# Backward-compat alias — some external callers may still import this name.
+EMERGENCY_BUY_MINUTES = EMERGENCY_BUY_RELAX_MINUTES
+
 EMERGENCY_SELL_MINUTES = 8
 
 # วันจันทร์=0 ... อาทิตย์=6
@@ -88,6 +98,9 @@ class SessionGateResult:
             "trades_this_session": 0,  # ✅ default; inject จริงผ่าน attach_session_gate_to_market_state
             "is_emergency_buy": False,
             "is_emergency_sell": False,
+            # Progressive stage: None | "relaxed" | "forced".
+            # is_emergency_buy stays as a back-compat boolean (True for either stage).
+            "emergency_buy_stage": None,
             "emergency_mode": None,
             "emergency_reason": None,
         }
@@ -253,25 +266,52 @@ def attach_session_gate_to_market_state(
             and mins_left <= EMERGENCY_SELL_MINUTES
             and held_gold > 1e-4
         )
-        is_emergency_buy = (
+
+        # Progressive Emergency Buy Mode — staged by minutes left.
+        #   forced  : mins_left ≤ EMERGENCY_BUY_FORCE_MINUTES  (most urgent)
+        #   relaxed : mins_left ≤ EMERGENCY_BUY_RELAX_MINUTES  (looser gates)
+        # Both require: zero trades this session AND no gold currently held.
+        emergency_buy_stage: Optional[str] = None
+        if (
             not is_emergency_sell
             and mins_left is not None
-            and mins_left <= EMERGENCY_BUY_MINUTES
-            and int(trades_this_session or 0) <= EMERGENCY_BUY_MAX_TRADES_THIS_SESSION
             and held_gold <= 1e-4
-        )
+            and int(trades_this_session or 0) <= EMERGENCY_BUY_MAX_TRADES_THIS_SESSION
+        ):
+            if mins_left <= EMERGENCY_BUY_FORCE_MINUTES:
+                emergency_buy_stage = "forced"
+            elif mins_left <= EMERGENCY_BUY_RELAX_MINUTES:
+                emergency_buy_stage = "relaxed"
 
+        is_emergency_buy = emergency_buy_stage is not None
+
+        d["emergency_buy_stage"] = emergency_buy_stage
         d["is_emergency_buy"] = is_emergency_buy
         d["is_emergency_sell"] = is_emergency_sell
+
         if is_emergency_sell:
             d["emergency_mode"] = "forced_sell"
             d["emergency_reason"] = (
                 f"Session ends in {mins_left} mins and portfolio holds {held_gold:.4f}g."
             )
-        elif is_emergency_buy:
+        elif emergency_buy_stage == "forced":
             d["emergency_mode"] = "forced_buy"
             d["emergency_reason"] = (
-                f"Session ends in {mins_left} mins and zero trades completed."
+                f"[FORCED] Session ends in {mins_left} mins "
+                f"(≤ {EMERGENCY_BUY_FORCE_MINUTES}) and zero trades completed "
+                f"— FORCED buy stage."
+            )
+        elif emergency_buy_stage == "relaxed":
+            # Keep emergency_mode = "forced_buy" so existing role-selection in
+            # ui/core/services.py (which switches to AGGRESSIVE_BULLISH on
+            # "forced_buy") still routes the same way during the relaxed window.
+            # The [RELAXED] / [FORCED] prefix on emergency_reason is what
+            # downstream logs/UI use to differentiate the two stages.
+            d["emergency_mode"] = "forced_buy"
+            d["emergency_reason"] = (
+                f"[RELAXED] Session ends in {mins_left} mins "
+                f"(≤ {EMERGENCY_BUY_RELAX_MINUTES}) and zero trades completed "
+                f"— RELAXED buy stage."
             )
         market_state["session_gate"] = d
     else:

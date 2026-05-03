@@ -34,6 +34,12 @@ class RiskManager:
         max_trade_risk_pct: float = 0.20,         # [V5] 1.00 → 0.20 (ลด exposure ต่อ trade)
         min_trades_per_session: int = 3,          # Compatibility only; SessionGate owns emergency decisions
         enable_trailing_stop: bool = True,
+        # ── Progressive Emergency Buy thresholds (Stage 1 = Relaxed) ────────
+        # Used only when session_gate.emergency_buy_stage == "relaxed".
+        # Stage 2 ("forced") fully bypasses confidence/edge/HTF gates.
+        # Absolute safety gates (cash, holding, daily-loss) are NEVER bypassed.
+        relaxed_min_conf: float = 0.45,
+        relaxed_min_edge: float = 0.5,
     ):
         self.atr_multiplier                  = atr_multiplier
         self.rr_ratio                        = risk_reward_ratio
@@ -45,6 +51,8 @@ class RiskManager:
         self.max_trade_risk_pct              = max_trade_risk_pct
         self.min_trades_per_session          = min_trades_per_session
         self.enable_trailing_stop            = enable_trailing_stop
+        self.relaxed_min_conf                = relaxed_min_conf
+        self.relaxed_min_edge                = relaxed_min_edge
 
         self._daily_loss_accumulated: float = 0.0
         self._loss_lock = threading.Lock()
@@ -70,7 +78,12 @@ class RiskManager:
     def evaluate(self, llm_decision: dict, market_state: dict) -> dict:
         signal         = llm_decision.get("signal", "HOLD").upper()
         confidence     = float(llm_decision.get("confidence", 0.0))
-        market_context = llm_decision.get("market_context", "")
+        market_context = (
+            llm_decision.get("market_context")
+            or llm_decision.get("rationale")
+            or llm_decision.get("thought")
+            or ""
+        )
 
         portfolio      = market_state.get("portfolio", {})
         cash_balance   = float(portfolio.get("cash_balance", 0.0))
@@ -144,14 +157,51 @@ class RiskManager:
             )
 
         # ================================================================
-        # Gate 0d — Session End Force BUY hint [NEW]
+        # Gate 0d — Progressive Emergency BUY [Stage 1: Relaxed | Stage 2: Forced]
         # SessionGate is the single source of truth for emergency BUY mode.
+        # Back-compat: legacy callers that set is_emergency_buy=True without
+        # the new emergency_buy_stage key are treated as "relaxed" — the
+        # safer of the two stages — to stay aligned with prompt.py's LLM
+        # directive for the same legacy input.
         # ================================================================
-        _force_buy_active = signal != "SELL" and bool(session_gate.get("is_emergency_buy"))
+        emergency_buy_stage = session_gate.get("emergency_buy_stage")
+        # Legacy back-compat: callers that set is_emergency_buy=True without
+        # the new stage key default to "relaxed" — the safer of the two stages.
+        # Aligns with prompt.py so risk.py and the LLM directive agree.
+        if emergency_buy_stage is None and bool(session_gate.get("is_emergency_buy")):
+            emergency_buy_stage = "relaxed"
+
+        _force_buy_active = (not _force_sell_active) and emergency_buy_stage == "forced"
+        _relaxed_buy_active = signal != "SELL" and emergency_buy_stage == "relaxed"
+
         if _force_buy_active:
+            original_signal = signal
+            signal = "BUY"
+            final_decision["signal"] = "BUY"
+            final_decision["entry_price"] = buy_price_thb
+            override_action = (
+                "accepted under hard override"
+                if original_signal == "BUY"
+                else "overridden"
+            )
+            if original_signal != "BUY":
+                final_decision["confidence"] = 1.0
+            final_decision["rationale"] = (
+                f"[SESSION FORCE BUY] Emergency buy override with {mins_left} min left "
+                f"and {trades_this_session} trades completed. "
+                f"LLM signal '{original_signal}' was {override_action}. "
+                f"Original rationale: {market_context}"
+            )
             logger.warning(
-                "[RiskManager] Gate 0d EMERGENCY FORCE BUY MODE — %s min left, trades=%d",
+                "[RiskManager] Gate 0d EMERGENCY FORCED BUY (Stage 2) — %s min left, trades=%d",
                 mins_left, trades_this_session,
+            )
+        elif _relaxed_buy_active:
+            logger.warning(
+                "[RiskManager] Gate 0d EMERGENCY RELAXED BUY (Stage 1) — %s min left, trades=%d "
+                "(min_conf=%.2f, min_edge=%.2f)",
+                mins_left, trades_this_session,
+                self.relaxed_min_conf, self.relaxed_min_edge,
             )
 
         # ================================================================
@@ -250,13 +300,24 @@ class RiskManager:
         # UNKNOWN → ใช้ค่า default ไม่ปรับ
 
         if signal == "BUY":
+            # ── ABSOLUTE SAFETY GATE: Already holding gold (NEVER bypassed) ──
             if gold_grams > 1e-4 or holding:
                 return self._reject_signal(final_decision, "Already holding gold")
-            if not _force_buy_active and final_decision["confidence"] < effective_min_conf:
-                return self._reject_signal(
-                    final_decision,
-                    f"BUY conf ({final_decision['confidence']:.2f}) < {effective_min_conf:.2f} (effective threshold)"
-                )
+
+            # ── Confidence threshold ──
+            #   forced  → bypass entirely
+            #   relaxed → use min(effective, relaxed_min_conf)
+            if _force_buy_active:
+                pass  # Stage 2: bypass confidence check
+            else:
+                conf_threshold = effective_min_conf
+                if _relaxed_buy_active:
+                    conf_threshold = min(effective_min_conf, self.relaxed_min_conf)
+                if final_decision["confidence"] < conf_threshold:
+                    return self._reject_signal(
+                        final_decision,
+                        f"BUY conf ({final_decision['confidence']:.2f}) < {conf_threshold:.2f} (effective threshold)"
+                    )
             if trades_today >= 3:
                 return self._reject_signal(final_decision, f"ครบโควต้าซื้อรายวันแล้ว ({trades_today}/6)")
 
@@ -264,18 +325,33 @@ class RiskManager:
             min_entries_by_now = int(quota.get("min_entries_by_now", 0) or 0)
             required_conf_next = float(quota.get("required_confidence_for_next_buy", self.min_confidence) or self.min_confidence)
 
-            if not _force_buy_active and trades_today < min_entries_by_now and confidence < required_conf_next:
+            # Scheduler-based conf check: bypass for both forced and relaxed.
+            if (
+                not _force_buy_active
+                and not _relaxed_buy_active
+                and trades_today < min_entries_by_now
+                and confidence < required_conf_next
+            ):
                 return self._reject_signal(final_decision, f"ตาม scheduler ยังไม่ทัน และ conf ({confidence:.2f}) < {required_conf_next:.2f}")
 
             execution_check = llm_decision.get("execution_check", {}) or {}
             if execution_check.get("is_spread_covered") is False:
-                if not _force_buy_active:
+                if _force_buy_active:
+                    logger.warning("[RiskManager] Stage 2 FORCED BUY bypassed LLM spread check")
+                elif _relaxed_buy_active:
+                    logger.warning("[RiskManager] Stage 1 RELAXED BUY: warn-only on spread coverage")
+                else:
                     return self._reject_signal(final_decision, "LLM ระบุว่ายังไม่ครอบคลุม spread")
-                logger.warning("[RiskManager] Emergency BUY bypassed LLM spread check")
 
             htf = market_state.get("pre_fetched_tools", {}).get("get_htf_trend", {})
             htf_trend = str(htf.get("trend", "")).lower() if isinstance(htf, dict) else ""
-            if not _force_buy_active and "bear" in htf_trend and confidence < 0.67:
+            # forced → bypass HTF entirely. relaxed → also bypass (trying to find any setup).
+            if (
+                not _force_buy_active
+                and not _relaxed_buy_active
+                and "bear" in htf_trend
+                and confidence < 0.67
+            ):
                 return self._reject_signal(final_decision, f"HTF bearish ({htf.get('trend')}) — BUY ต้อง conf >= 0.67")
 
             spread_thb = max(0.0, buy_price_thb - sell_price_thb)
@@ -300,28 +376,46 @@ class RiskManager:
                 logger.debug("[RiskManager] fallback edge recalc: atr=%.0f expected=%.2f edge=%.4f",
                              _atr_fallback, expected_move_thb, edge_score)
 
-            if effective_spread > 0 and edge_score < 0.8:
-                # [FIX v11] threshold 1.0→0.8 (buffer สำหรับ ATR-based edge)
-                # [FIX Bug 4] ยังอนุญาตได้ถ้าอยู่ใน quota urgent mode (ใกล้หมด session)
-                if not is_quota_urgent:
-                    return self._reject_signal(final_decision, f"เอ็จไม่พอชนะ spread (edge={edge_score:.2f})")
-                else:
+            if effective_spread > 0:
+                # Stage 2 forced → bypass edge gate completely.
+                # Stage 1 relaxed → use the configurable relaxed_min_edge.
+                # Otherwise → default 0.8 (with the existing quota_urgent leniency).
+                if _force_buy_active:
                     logger.warning(
-                        "[RiskManager] Edge score %.2f < 1.0 — ยอมรับเพราะ quota urgent mode (mins_left=%s)",
+                        "[RiskManager] Stage 2 FORCED BUY bypassed edge gate (edge=%.2f)",
+                        edge_score,
+                    )
+                elif _relaxed_buy_active:
+                    if edge_score < self.relaxed_min_edge:
+                        return self._reject_signal(
+                            final_decision,
+                            f"Stage 1 RELAXED: edge {edge_score:.2f} < {self.relaxed_min_edge:.2f}"
+                        )
+                elif edge_score < 0.8:
+                    # [FIX v11] threshold 1.0→0.8 (buffer สำหรับ ATR-based edge)
+                    # [FIX Bug 4] ยังอนุญาตได้ถ้าอยู่ใน quota urgent mode (ใกล้หมด session)
+                    if not is_quota_urgent:
+                        return self._reject_signal(final_decision, f"เอ็จไม่พอชนะ spread (edge={edge_score:.2f})")
+                    logger.warning(
+                        "[RiskManager] Edge score %.2f < 0.8 — ยอมรับเพราะ quota urgent mode (mins_left=%s)",
                         edge_score, mins_left,
                     )
 
             if not can_trade:
                 return self._reject_signal(final_decision, "เงินคงเหลือต่ำกว่าเกณฑ์ขั้นต่ำ")
 
-            if not _force_buy_active and capital_mode == "critical" and confidence < 0.76:
+            # Capital-mode confidence caps: bypass for both forced AND relaxed
+            # emergency stages (relaxed already lowered the base threshold; these
+            # caps would otherwise resurrect a 0.68/0.76 bar that defeats Stage 1).
+            _emergency_buy_active = _force_buy_active or _relaxed_buy_active
+            if not _emergency_buy_active and capital_mode == "critical" and confidence < 0.76:
                 return self._reject_signal(final_decision, "ทุน critical ต้อง BUY conf >= 0.76")
-            if not _force_buy_active and capital_mode == "defensive" and confidence < 0.68:
+            if not _emergency_buy_active and capital_mode == "defensive" and confidence < 0.68:
                 return self._reject_signal(final_decision, "ทุน defensive ต้อง BUY conf >= 0.68")
-            
-            if not _force_buy_active and holding and profiting and confidence < 0.74:
+
+            if not _emergency_buy_active and holding and profiting and confidence < 0.74:
                 return self._reject_signal(final_decision, "มีกำไรอยู่แล้ว BUY เพิ่มต้อง conf >= 0.74")
-            if not _force_buy_active and holding and not profiting and confidence < 0.80:
+            if not _emergency_buy_active and holding and not profiting and confidence < 0.80:
                 return self._reject_signal(final_decision, "มีของขาดทุนอยู่ ไม่ถัวเพิ่มถ้า conf < 0.80")
 
         elif signal == "SELL" and final_decision["confidence"] < self.min_sell_confidence:
@@ -350,7 +444,13 @@ class RiskManager:
 
             near_end    = session_gate.get("near_session_end", False)
             trades_done = session_gate.get("trades_this_session", 0)
-            is_forced   = _force_buy_active or (near_end and (trades_done < 1))  # [V6] < 2 → < 1 (quota ลดเหลือ 3/วัน)
+            # Both Stage 1 (relaxed) and Stage 2 (forced) emergency BUYs use the
+            # safe minimum position size to cap exposure when quality is uncertain.
+            is_forced   = (
+                _force_buy_active
+                or _relaxed_buy_active
+                or (near_end and (trades_done < 1))  # [V6] < 2 → < 1 (quota ลดเหลือ 3/วัน)
+            )
 
             # ✅[FIX] นำ Logic การดึง Position Size ของ LLM ที่เคยเป็น Dead Code มารวมไว้ตรงนี้
             llm_suggested_size = float(llm_decision.get("position_size_thb") or 0.0)
