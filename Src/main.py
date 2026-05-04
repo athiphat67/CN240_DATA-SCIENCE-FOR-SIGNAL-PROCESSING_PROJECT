@@ -364,6 +364,7 @@ def main():
                  "provider":  args.provider,
                  "period":    args.period,
                  "interval":  '5m',
+                 "loop_sleep_seconds": 30,
              },
          )
          _watcher.start()

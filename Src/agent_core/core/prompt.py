@@ -110,7 +110,7 @@ class SkillRegistry:
         return sorted(tools)
 
     def load_from_json(self, filepath: str) -> None:
-        with open(filepath) as f:
+        with open(filepath, 'r', encoding="utf-8") as f:
             data = json.load(f)
         for sd in data.get("skills", []):
             self.register(
@@ -170,7 +170,7 @@ class RoleRegistry:
         return self.roles.get(role)
 
     def load_from_json(self, filepath: str) -> None:
-        with open(filepath) as f:
+        with open(filepath, 'r', encoding="utf-8") as f:
             data = json.load(f)
         for rd in data.get("roles", []):
             role_enum = AIRole(rd["name"])
@@ -236,8 +236,16 @@ class PromptBuilder:
         max_pos = int(role_def.max_position_thb or 1000)
 
         static_text = role_def.system_prompt_static or role_def.system_prompt_template
+        directive = market_state.get("backtest_directive", "")
+        emergency_directive = self._build_emergency_directive(
+            market_state.get("session_gate")
+        )
+        if emergency_directive:
+            directive = (
+                f"{directive}\n\nEMERGENCY SESSION DIRECTIVE\n{emergency_directive}"
+            ).strip()
         dynamic_text = role_def.render_dynamic(
-            directive=market_state.get("backtest_directive", ""),
+            directive=directive,
             session_gate=market_state.get("session_gate"),
             market_state={k: v for k, v in market_state.items()
                           if k not in ("backtest_directive", "session_gate")},
@@ -310,6 +318,13 @@ class PromptBuilder:
                 f"## FINAL_DECISION mandatory – Triple scenario (bull/bear/neutral) then decision.\n"
                 f"HOLD only if confidence<{self.confidence_threshold} or <2 conditions met."
             )
+
+        if self._build_emergency_directive(market_state.get("session_gate")):
+            action_guidance = (
+                f"{action_guidance}\n\n"
+                "EMERGENCY OVERRIDE: Follow the EMERGENCY SESSION DIRECTIVE in MARKET STATE "
+                "before normal confidence, edge, or role preferences."
+            )
         
         if iteration == 1 and not has_pre_fetched:
             tools_section = self._format_available_tools(verbose=True)
@@ -344,6 +359,12 @@ class PromptBuilder:
         role_def = self._require_role()
         max_pos = int(role_def.max_position_thb or 1000)
         system = self._get_system()
+        emergency_rule = ""
+        if self._build_emergency_directive(market_state.get("session_gate")):
+            emergency_rule = (
+                "0. EMERGENCY OVERRIDE: Follow the EMERGENCY SESSION DIRECTIVE in MARKET STATE "
+                "before normal confidence, edge, or role preferences.\n"
+            )
 
         user = textwrap.dedent(f"""
             ### MARKET STATE
@@ -373,6 +394,7 @@ class PromptBuilder:
             }}
 
             CRITICAL RULES:
+            {emergency_rule}
             1. If signal is BUY, position_size_thb MUST be {max_pos}.
             2. Default to HOLD ONLY if: (a) confidence < {self.confidence_threshold}, OR
                (b) fewer than 2 BUY/SELL conditions are met.
@@ -390,6 +412,40 @@ class PromptBuilder:
         if not role_def:
             raise ValueError(f"Role '{self.role}' not registered")
         return role_def
+
+    @staticmethod
+    def _build_emergency_directive(session_gate: dict | None) -> str:
+        if not session_gate or not session_gate.get("apply_gate"):
+            return ""
+
+        mins_left = session_gate.get("minutes_to_session_end")
+        if session_gate.get("is_emergency_sell"):
+            return (
+                f"URGENT: Session ends in {mins_left} mins. "
+                "SELL ALL gold immediately. Profit/Loss is irrelevant. "
+                "Market exit is mandatory."
+            )
+
+        # Progressive emergency BUY directive — stage decides the tone.
+        # Stage 2 ("forced") tells the LLM to enter immediately; Stage 1
+        # ("relaxed") asks for any reasonable setup with relaxed gates.
+        # Legacy callers that only set is_emergency_buy=True (no stage key)
+        # default to the relaxed wording for back-compat.
+        stage = session_gate.get("emergency_buy_stage")
+        if stage == "forced":
+            return (
+                f"URGENT (FORCED): Session ends in {mins_left} mins. "
+                "Zero trades completed. EXECUTE BUY IMMEDIATELY — "
+                "ignore edge score, spread coverage, and HTF trend gates. "
+                "Do not wait for further confirmation."
+            )
+        if stage == "relaxed" or session_gate.get("is_emergency_buy"):
+            return (
+                f"URGENT: Session ends in {mins_left} mins. "
+                "Zero trades completed. RELAX all technical gates. "
+                "Find any reasonable support or momentum to ENTER now."
+            )
+        return ""
 
     def _format_available_tools(self, verbose: bool = False) -> str:
         """
@@ -413,6 +469,18 @@ class PromptBuilder:
                 lines.append(f"{i}. {name}")
         return "\n".join(lines)
 
+    def _format_hsh_price(self, value) -> str:
+        try:
+            return f"฿{float(value):,.2f}/baht-gold"
+        except (TypeError, ValueError):
+            return "N/A"
+
+    def _format_usd_price(self, value) -> str:
+        try:
+            return f"${float(value):,.2f}"
+        except (TypeError, ValueError):
+            return f"${value}"
+
     def _format_market_state(self, state: dict, iteration: int = 1) -> str:
         """Format market state for LLM — dynamically slims down in later iterations"""
         md   = state.get("market_data", {})
@@ -425,12 +493,48 @@ class PromptBuilder:
         spread_cov = md.get("spread_coverage", {})
         sell_thb = thai.get("sell_price_thb", "N/A")
         buy_thb  = thai.get("buy_price_thb", "N/A")
+        thai_unit = thai.get("unit")
+        buy_exec_display = sell_thb
+        sell_exec_display = buy_thb
+        hsh_price_unit = (
+            thai_unit == "THB_PER_BAHT_GOLD"
+            or ti.get("price_unit") == "THB_PER_BAHT_GOLD"
+            or (ti.get("atr", {}) or {}).get("unit") == "THB_PER_BAHT_GOLD"
+        )
+        if thai_unit == "THB_PER_BAHT_GOLD":
+            try:
+                buy_exec_display = f"{float(sell_thb) / 15.244:,.2f}"
+                sell_exec_display = f"{float(buy_thb) / 15.244:,.2f}"
+            except (TypeError, ValueError):
+                buy_exec_display = sell_thb
+                sell_exec_display = buy_thb
 
         rsi   = ti.get("rsi", {})
         macd  = ti.get("macd", {})
         trend = ti.get("trend", {})
         bb    = ti.get("bollinger", {})
         atr   = ti.get("atr", {})
+        if hsh_price_unit:
+            trend_line = (
+                f"Trend: EMA20={self._format_hsh_price(trend.get('ema_20'))} "
+                f"EMA50={self._format_hsh_price(trend.get('ema_50'))}"
+                f"[{trend.get('trend', 'N/A')}]"
+            )
+            bb_line = (
+                f"BB up/low: {self._format_hsh_price(bb.get('upper'))} / "
+                f"{self._format_hsh_price(bb.get('lower'))} | "
+                f"Close mid: {self._format_hsh_price(ti.get('latest_close'))} | "
+                f"ATR: {atr.get('value', 'N/A')} THB_PER_BAHT_GOLD"
+            )
+        else:
+            trend_line = (
+                f"Trend: EMA20={trend.get('ema_20', 'N/A')} "
+                f"EMA50={trend.get('ema_50', 'N/A')}[{trend.get('trend', 'N/A')}]"
+            )
+            bb_line = (
+                f"BB: up={bb.get('upper', 'N/A')} low={bb.get('lower', 'N/A')} | "
+                f"Close: ${ti.get('latest_close', 'N/A')} | ATR: {atr.get('value', 'N/A')} THB"
+            )
 
         timestamp_str = state.get("timestamp") or md.get("spot_price_usd", {}).get("timestamp", "")
         interval      = state.get("interval", "15m")
@@ -458,12 +562,21 @@ class PromptBuilder:
         # ── 1. แกนหลัก (ส่งทุกรอบเพราะต้องใช้อ้างอิงราคา Real-time) ──
         lines =[
             f"Time: {timestamp_str} ({time_part}) | Int: {interval}{dead_zone_warning}",
-            f"Gold: ${spot}/oz | USD/THB: {usd_thb} | THB/g: ฿{sell_thb} sell / ฿{buy_thb} buy",
+            f"Gold: ${spot}/oz | USD/THB: {usd_thb} | BUY ask: ฿{buy_exec_display}/g | SELL bid: ฿{sell_exec_display}/g",
             f"Spread: {spread_cov.get('spread_thb', 'N/A')} THB | Expected Move: {spread_cov.get('expected_move_thb', 'N/A')} THB | edge_score: {spread_cov.get('edge_score', 'N/A')}",
             f"RSI({rsi.get('period', 14)}): {rsi.get('value', 'N/A')} | MACD: {macd.get('macd_line', 'N/A')}/{macd.get('signal_line', 'N/A')} hist:{macd.get('histogram', 'N/A')}",
-            f"Trend: EMA20={trend.get('ema_20', 'N/A')} EMA50={trend.get('ema_50', 'N/A')}[{trend.get('trend', 'N/A')}]",
-            f"BB: up={bb.get('upper', 'N/A')} low={bb.get('lower', 'N/A')} | Close: ${ti.get('latest_close', 'N/A')} | ATR: {atr.get('value', 'N/A')} THB",
+            trend_line,
+            bb_line,
         ]
+
+        emergency_directive = self._build_emergency_directive(state.get("session_gate"))
+        if emergency_directive:
+            lines += [
+                "",
+                "!!! EMERGENCY SESSION DIRECTIVE !!!",
+                emergency_directive,
+                "!!! END EMERGENCY SESSION DIRECTIVE !!!",
+            ]
 
         # ── [MTF Phase 3] Market Regime Analysis (15m/30m) ──
         regime = state.get("market_regime", "UNKNOWN")
@@ -611,7 +724,12 @@ class PromptBuilder:
         portfolio = state.get("portfolio", {})
         tp_price = portfolio.get("take_profit_price")
         sl_price = portfolio.get("stop_loss_price")
-        gold_g   = float(portfolio.get("gold_grams", 0.0))
+        # แก้ไขเป็นบล็อกป้องกัน Error:
+        raw_gold = portfolio.get("gold_grams", 0.0)
+        try:
+            gold_g = float(raw_gold)
+        except (ValueError, TypeError):
+            gold_g = 0.0  # ถ้าแปลงเลขไม่ได้ ให้เซ็ตเป็น 0 ไว้ก่อน
         if gold_g > 0 and (tp_price or sl_price):
             lines += [
                 "",
@@ -635,24 +753,44 @@ class PromptBuilder:
             sg = state.get("session_gate")
             if sg and sg.get("apply_gate"):
                 notes = [f"  • {n}" for n in (sg.get("notes") or [])]
+                context_instruction = (
+                    "Emergency directive overrides normal market-evidence preferences."
+                    if sg.get("emergency_mode")
+                    else "Use as context only; do not override market evidence."
+                )
                 lines += [
                     "",
                     "── Session Context ──",
                     f"session: {sg.get('session_id')}",
                     f"mins_left: {sg.get('minutes_to_session_end')}",
                     f"mode: {sg.get('llm_mode')}",
-                    "Use as context only; do not override market evidence.",
+                    f"emergency_mode: {sg.get('emergency_mode')}",
+                    context_instruction,
                     *notes,
                     "── End Session Context ──",
                 ]
 
             price_trend = md.get("price_trend", {})
             if price_trend:
+                if hsh_price_unit:
+                    current_trend = self._format_hsh_price(
+                        price_trend.get("current_close_thb")
+                    )
+                    prev_trend = self._format_hsh_price(
+                        price_trend.get("prev_close_thb")
+                    )
+                    change_label = "Change"
+                    change_value = price_trend.get("change_pct", "N/A")
+                else:
+                    current_trend = f"${price_trend.get('current_close_usd', 'N/A')}"
+                    prev_trend = f"${price_trend.get('prev_close_usd', 'N/A')}"
+                    change_label = "Daily chg"
+                    change_value = price_trend.get("daily_change_pct", "N/A")
                 lines += [
                     "",
                     "── Price Trend ──",
-                    f"  Current: ${price_trend.get('current_close_usd', 'N/A')} | Prev: ${price_trend.get('prev_close_usd', 'N/A')}",
-                    f"  Daily chg: {price_trend.get('daily_change_pct', 'N/A')}%",
+                    f"  Current: {current_trend} | Prev: {prev_trend}",
+                    f"  {change_label}: {change_value}%",
                 ]
                 if "5d_change_pct" in price_trend:
                     lines.append(f"  5d chg: {price_trend['5d_change_pct']}%")
@@ -677,8 +815,19 @@ class PromptBuilder:
         
         # ── 3. ซ่อนข้อมูลยืดเยื้อใน Iteration ถัดไป ──
         else:
+            if hsh_price_unit:
+                compact_price_line = (
+                    f"Timestamp: {timestamp_str} | BUY ask: ฿{buy_exec_display}/g | "
+                    f"SELL bid: ฿{sell_exec_display}/g | "
+                    f"Close mid: {self._format_hsh_price(ti.get('latest_close'))}"
+                )
+            else:
+                compact_price_line = (
+                    f"Timestamp: {timestamp_str} | Price: ฿{sell_thb} sell / ฿{buy_thb} buy | "
+                    f"Close: ${ti.get('latest_close','N/A')}/oz"
+                )
             lines = [
-                f"Timestamp: {timestamp_str} | Price: ฿{sell_thb} sell / ฿{buy_thb} buy | Close: ${ti.get('latest_close','N/A')}/oz",
+                compact_price_line,
             ]
             if directive:
                 lines += ["── DIRECTIVE ──", directive, "────────────────"]
