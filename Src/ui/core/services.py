@@ -121,8 +121,8 @@ def _normalize_provider(provider: str) -> str:
     return provider
 
 
-DAILY_TARGET_ENTRIES = 3
-QUOTA_CONFIDENCE_LADDER = (0.60, 0.63, 0.67)
+DAILY_TARGET_ENTRIES = 100
+QUOTA_CONFIDENCE_LADDER = (0.35, 0.50, 0.55)
 QUOTA_POSITION_LADDER_THB = (1000, 1000, 1000)
 
 
@@ -164,7 +164,7 @@ def build_execution_quota_from_portfolio(
 
     current_slot = _current_quota_slot()
     min_entries_by_now = max(0, current_slot - 1)
-    next_slot_index = min(trades_today, DAILY_TARGET_ENTRIES - 1)
+    next_slot_index = min(trades_today, len(QUOTA_CONFIDENCE_LADDER) - 1)
     recommended_position = (
         0 if quota_met else QUOTA_POSITION_LADDER_THB[next_slot_index]
     )

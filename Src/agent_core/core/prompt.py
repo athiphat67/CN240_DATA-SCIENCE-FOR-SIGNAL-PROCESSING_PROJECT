@@ -658,11 +658,11 @@ class PromptBuilder:
             lines += [
                 "",
                 "── Daily Entry Quota ──",
-                f"  Target entries/day: {quota.get('daily_target_entries', 3)}",
+                f"  Target entries/day: {quota.get('daily_target_entries', 100)}",
                 f"  Entries done:       {quota.get('entries_done', 0)}",
                 f"  Entries remaining:  {quota.get('entries_remaining', 0)}",
                 f"  Quota met:          {quota.get('quota_met', False)}",
-                f"  Current slot:       {quota.get('current_slot', 'N/A')} / 3",
+                f"  Current slot:       {quota.get('current_slot', 'N/A')}",
                 f"  Min entries by now: {quota.get('min_entries_by_now', 'N/A')}",
                 f"  Next BUY min conf:  {quota.get('required_confidence_for_next_buy', 'N/A')}",
                 f"  Next BUY size:      {quota.get('recommended_next_position_thb', 'N/A')} THB",

@@ -413,7 +413,7 @@ class GoldTradingOrchestrator:
         latest_news = latest_news[:10]
 
         effective_interval = interval or self.interval
-        daily_target_entries = 3  # [FIX v2] 6→3 rounds/day
+        daily_target_entries = 100  # [FIX v13] Increased for aggressive scalping
         
         # [v12] 3 slots: early=0.60, mid=0.63, late=0.67 (ลด ~3% ต่อ slot)
 

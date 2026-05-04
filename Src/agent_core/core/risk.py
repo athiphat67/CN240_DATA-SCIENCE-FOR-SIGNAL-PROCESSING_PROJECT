@@ -26,8 +26,8 @@ class RiskManager:
         self,
         atr_multiplier: float = 2.5,             # [V5] 0.5 → 2.5 (SL หายใจได้มากขึ้น)
         risk_reward_ratio: float = 1.5,           # [V5] 1.0 → 1.5 (TP ใกล้ขึ้น win rate เพิ่ม)
-        min_confidence: float = 0.52,              # [V6] 0.55→0.52 ซื้อง่ายขึ้น ~5%
-        min_sell_confidence: float = 0.52,         # [V6] sync กับ min_confidence
+        min_confidence: float = 0.30,              # Lowered to 0.30 to respect LLM
+        min_sell_confidence: float = 0.30,         # sync กับ min_confidence
         min_trade_thb: float = 1000.0,
         micro_port_threshold: float = 2000.0,
         max_daily_loss_thb: float = 500.0,
@@ -281,32 +281,28 @@ class RiskManager:
         _regime_atr_mult = self.atr_multiplier      # default
 
         if market_regime == "UPTREND":
-            # ขาขึ้น: ลด threshold เพื่อตาม momentum ได้ทัน + TP กว้างขึ้นรันเทรนด์
-            _regime_conf_adj = -0.04          # ลด 4% (เช่น 0.52 → 0.48)
+            # ขาขึ้น: TP กว้างขึ้นรันเทรนด์
             _regime_rr_ratio = 2.0            # TP ไกลขึ้น (RR 1:2)
             _regime_atr_mult = 2.5            # SL กว้างพอหายใจ
-            effective_min_conf = max(0.45, effective_min_conf + _regime_conf_adj)
             logger.info(
-                "[MTF Phase 4] UPTREND regime — relaxed conf=%.2f RR=%.1f ATR×%.1f",
-                effective_min_conf, _regime_rr_ratio, _regime_atr_mult,
+                "[MTF Phase 4] UPTREND regime — RR=%.1f ATR×%.1f",
+                _regime_rr_ratio, _regime_atr_mult,
             )
         elif market_regime == "DOWNTREND":
-            # ขาลง: เพิ่ม threshold กรองสัญญาณหลอก + SL/TP แคบสำหรับ rebound
-            _regime_conf_adj = +0.13          # เพิ่ม 13% (เช่น 0.52 → 0.65)
+            # ขาลง: SL/TP แคบสำหรับ rebound
             _regime_rr_ratio = 1.0            # TP สั้น (RR 1:1 พอ)
             _regime_atr_mult = 1.5            # SL แคบ ตัดเร็ว
-            effective_min_conf = min(0.90, effective_min_conf + _regime_conf_adj)
             logger.info(
-                "[MTF Phase 4] DOWNTREND regime — strict conf=%.2f RR=%.1f ATR×%.1f",
-                effective_min_conf, _regime_rr_ratio, _regime_atr_mult,
+                "[MTF Phase 4] DOWNTREND regime — RR=%.1f ATR×%.1f",
+                _regime_rr_ratio, _regime_atr_mult,
             )
         elif market_regime == "SIDEWAYS":
-            # ไซด์เวย์: threshold ปกติ + TP สั้น hit-and-run
+            # ไซด์เวย์: TP สั้น hit-and-run
             _regime_rr_ratio = 1.0            # เน้นรัด TP ให้โดนง่าย
             _regime_atr_mult = 2.0
             logger.info(
-                "[MTF Phase 4] SIDEWAYS regime — normal conf=%.2f RR=%.1f ATR×%.1f",
-                effective_min_conf, _regime_rr_ratio, _regime_atr_mult,
+                "[MTF Phase 4] SIDEWAYS regime — RR=%.1f ATR×%.1f",
+                _regime_rr_ratio, _regime_atr_mult,
             )
         # UNKNOWN → ใช้ค่า default ไม่ปรับ
 
@@ -329,8 +325,8 @@ class RiskManager:
                         final_decision,
                         f"BUY conf ({final_decision['confidence']:.2f}) < {conf_threshold:.2f} (effective threshold)"
                     )
-            if trades_today >= 3:
-                return self._reject_signal(final_decision, f"ครบโควต้าซื้อรายวันแล้ว ({trades_today}/6)")
+            # if trades_today >= 3:
+            #     return self._reject_signal(final_decision, f"ครบโควต้าซื้อรายวันแล้ว ({trades_today}/6)")
 
             quota = market_state.get("execution_quota", {}) or {}
             min_entries_by_now = int(quota.get("min_entries_by_now", 0) or 0)
@@ -361,9 +357,9 @@ class RiskManager:
                 not _force_buy_active
                 and not _relaxed_buy_active
                 and "bear" in htf_trend
-                and confidence < 0.67
+                and confidence < 0.40
             ):
-                return self._reject_signal(final_decision, f"HTF bearish ({htf.get('trend')}) — BUY ต้อง conf >= 0.67")
+                return self._reject_signal(final_decision, f"HTF bearish ({htf.get('trend')}) — BUY ต้อง conf >= 0.40")
 
             spread_thb = edge_spread_thb
             market_data = market_state.get("market_data", {})
@@ -402,13 +398,11 @@ class RiskManager:
                             final_decision,
                             f"Stage 1 RELAXED: edge {edge_score:.2f} < {self.relaxed_min_edge:.2f}"
                         )
-                elif edge_score < 0.8:
-                    # [FIX v11] threshold 1.0→0.8 (buffer สำหรับ ATR-based edge)
-                    # [FIX Bug 4] ยังอนุญาตได้ถ้าอยู่ใน quota urgent mode (ใกล้หมด session)
+                elif edge_score < 0.35:
                     if not is_quota_urgent:
-                        return self._reject_signal(final_decision, f"เอ็จไม่พอชนะ spread (edge={edge_score:.2f})")
+                        return self._reject_signal(final_decision, f"เอ็จต่ำเกินไป (edge={edge_score:.2f})")
                     logger.warning(
-                        "[RiskManager] Edge score %.2f < 0.8 — ยอมรับเพราะ quota urgent mode (mins_left=%s)",
+                        "[RiskManager] Edge score %.2f < 0.35 — ยอมรับเพราะ quota urgent mode (mins_left=%s)",
                         edge_score, mins_left,
                     )
 
@@ -419,15 +413,15 @@ class RiskManager:
             # emergency stages (relaxed already lowered the base threshold; these
             # caps would otherwise resurrect a 0.68/0.76 bar that defeats Stage 1).
             _emergency_buy_active = _force_buy_active or _relaxed_buy_active
-            if not _emergency_buy_active and capital_mode == "critical" and confidence < 0.76:
-                return self._reject_signal(final_decision, "ทุน critical ต้อง BUY conf >= 0.76")
-            if not _emergency_buy_active and capital_mode == "defensive" and confidence < 0.68:
-                return self._reject_signal(final_decision, "ทุน defensive ต้อง BUY conf >= 0.68")
+            if not _emergency_buy_active and capital_mode == "critical" and confidence < 0.50:
+                return self._reject_signal(final_decision, "ทุน critical ต้อง BUY conf >= 0.50")
+            if not _emergency_buy_active and capital_mode == "defensive" and confidence < 0.40:
+                return self._reject_signal(final_decision, "ทุน defensive ต้อง BUY conf >= 0.40")
 
-            if not _emergency_buy_active and holding and profiting and confidence < 0.74:
-                return self._reject_signal(final_decision, "มีกำไรอยู่แล้ว BUY เพิ่มต้อง conf >= 0.74")
-            if not _emergency_buy_active and holding and not profiting and confidence < 0.80:
-                return self._reject_signal(final_decision, "มีของขาดทุนอยู่ ไม่ถัวเพิ่มถ้า conf < 0.80")
+            if not _emergency_buy_active and holding and profiting and confidence < 0.40:
+                return self._reject_signal(final_decision, "มีกำไรอยู่แล้ว BUY เพิ่มต้อง conf >= 0.40")
+            if not _emergency_buy_active and holding and not profiting and confidence < 0.50:
+                return self._reject_signal(final_decision, "มีของขาดทุนอยู่ ไม่ถัวเพิ่มถ้า conf < 0.50")
 
         elif signal == "SELL" and final_decision["confidence"] < self.min_sell_confidence:
             return self._reject_signal(final_decision, f"SELL conf ({final_decision['confidence']:.2f}) < {self.min_sell_confidence}")

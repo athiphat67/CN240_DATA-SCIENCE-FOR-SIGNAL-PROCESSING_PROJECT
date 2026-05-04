@@ -53,7 +53,7 @@ class WatcherConfig(BaseModel):
     interval:                     str   = Field(default="5m",     description="Candle interval")
     market_data_source:           str   = Field(default_factory=lambda: os.getenv("MARKET_DATA_SOURCE", "supabase_hsh_ig"), description="Market data source")
     cooldown_minutes:             int   = Field(default=5,   ge=1,    description="Min minutes between AI triggers")
-    min_price_step:               float = Field(default=1.5, gt=0.0,  description="Min THB/gram move to re-trigger")
+    min_price_step:               float = Field(default=5, gt=0.0,  description="Min THB/gram move to re-trigger")
     rsi_oversold:                 float = Field(default=30.0, ge=0,  le=50,  description="RSI oversold threshold")
     rsi_overbought:               float = Field(default=70.0, ge=50, le=100, description="RSI overbought threshold")
     trailing_stop_profit_trigger: float = Field(default=20.0, gt=0,  description="Profit/gram ที่ขยับ SL")
@@ -423,20 +423,11 @@ class WatcherEngine:
         # ── กรณีไม่มีทองในมือ ────────────────────────────────────────────────
         else:
 
-            # Case 3: oversold → buy opportunity
-            if strong_oversold:
-                return True, (
-                    f"💰 STRONG_OVERSOLD (RSI={rsi:.1f}, MACD+BB confirm) "
-                    f"— wake AI for buy"
-                )
-
-            if rsi < self.config.rsi_oversold:
-                return True, (
-                    f"💰 Oversold (RSI={rsi:.1f}) "
-                    f"— wake AI for buy decision"
-                )
-
-            return False, f"No position — waiting for oversold (RSI={rsi:.1f})"
+            # Case 3: Ultra Scalper Mode -> Always look for entries
+            return True, (
+                f"🔍 Aggressive Scalping (RSI={rsi:.1f}) "
+                f"— wake AI for continuous buy evaluation"
+            )
 
     # ── Signal Filter ─────────────────────────────────────────────────────────
 
