@@ -30,6 +30,7 @@ Changes v2.0 (Full Priority Fix):
 import threading
 import time
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
@@ -50,8 +51,9 @@ class WatcherConfig(BaseModel):
     provider:                     str   = Field(default="gemini", description="LLM provider")
     period:                       str   = Field(default="1d",     description="Data period")
     interval:                     str   = Field(default="5m",     description="Candle interval")
+    market_data_source:           str   = Field(default_factory=lambda: os.getenv("MARKET_DATA_SOURCE", "supabase_hsh_ig"), description="Market data source")
     cooldown_minutes:             int   = Field(default=5,   ge=1,    description="Min minutes between AI triggers")
-    min_price_step:               float = Field(default=1.5, gt=0.0,  description="Min THB/gram move to re-trigger")
+    min_price_step:               float = Field(default=5, gt=0.0,  description="Min THB/gram move to re-trigger")
     rsi_oversold:                 float = Field(default=30.0, ge=0,  le=50,  description="RSI oversold threshold")
     rsi_overbought:               float = Field(default=70.0, ge=50, le=100, description="RSI overbought threshold")
     trailing_stop_profit_trigger: float = Field(default=20.0, gt=0,  description="Profit/gram ที่ขยับ SL")
@@ -126,6 +128,8 @@ class WatcherEngine:
         self.analysis_service  = analysis_service
         self.data_orchestrator = data_orchestrator
         self.config            = WatcherConfig(**watcher_config)
+        if hasattr(self.data_orchestrator, "market_data_source"):
+            self.data_orchestrator.market_data_source = self.config.market_data_source
         self.is_running        = False
         self.lock              = threading.Lock()
         self.logs: list[str]   = []
@@ -183,15 +187,36 @@ class WatcherEngine:
                     interval=self.config.interval,
                 )
 
-                # 2. อ่านราคา
-                current_price_per_gram = self._extract_price(market_state)
-                if current_price_per_gram is None:
+                data_quality = market_state.get("data_quality", {}) or {}
+                dq_status = data_quality.get("status", "ok")
+                dq_stale = bool(data_quality.get("stale", False))
+                if dq_status != "ok" or dq_stale:
+                    self.log(
+                        "⚠️ Market data skipped — "
+                        f"source={data_quality.get('source', 'unknown')} "
+                        f"status={dq_status} stale={dq_stale} "
+                        f"age_seconds={data_quality.get('age_seconds')} "
+                        f"warnings={data_quality.get('warnings', [])}",
+                        "ERROR",
+                    )
+                    time.sleep(self.config.loop_sleep_seconds)
+                    continue
+
+                # 2. อ่านราคาแบบแยกบทบาท: mid=movement, ask=BUY, bid=SELL/SL
+                current_price_per_gram = self._extract_mid_price_per_gram(market_state)
+                buy_execution_price_per_gram = self._extract_buy_execution_price_per_gram(market_state)
+                sell_execution_price_per_gram = self._extract_sell_execution_price_per_gram(market_state)
+                if (
+                    current_price_per_gram is None
+                    or buy_execution_price_per_gram is None
+                    or sell_execution_price_per_gram is None
+                ):
                     self.log("⚠️ Cannot read gold price — skipping cycle", "ERROR")
                     time.sleep(3)
                     continue
 
-                # 3. [P0] Trailing Stop ต้องรันก่อน evaluate เสมอ
-                self._manage_trailing_stop(current_price_per_gram)
+                # 3. [P0] Trailing Stop ต้องใช้ราคาที่ขายได้จริง (dealer bid)
+                self._manage_trailing_stop(sell_execution_price_per_gram)
 
                 # 4. ตรวจสอบข้อมูลพื้นฐาน
                 ti      = market_state.get("technical_indicators", {})
@@ -231,11 +256,16 @@ class WatcherEngine:
                     continue
 
                 holding_gold = gold_grams > 0
+                strategy_price_per_gram = (
+                    sell_execution_price_per_gram
+                    if holding_gold
+                    else current_price_per_gram
+                )
 
                 # 7. ตัดสินใจตาม strategy
                 should_trigger, trigger_reason = self._evaluate_strategy(
                     holding_gold = holding_gold,
-                    current_price = current_price_per_gram,
+                    current_price = strategy_price_per_gram,
                     cost_basis   = cost_basis,
                     rsi          = rsi,
                     market_state = market_state,
@@ -393,20 +423,11 @@ class WatcherEngine:
         # ── กรณีไม่มีทองในมือ ────────────────────────────────────────────────
         else:
 
-            # Case 3: oversold → buy opportunity
-            if strong_oversold:
-                return True, (
-                    f"💰 STRONG_OVERSOLD (RSI={rsi:.1f}, MACD+BB confirm) "
-                    f"— wake AI for buy"
-                )
-
-            if rsi < self.config.rsi_oversold:
-                return True, (
-                    f"💰 Oversold (RSI={rsi:.1f}) "
-                    f"— wake AI for buy decision"
-                )
-
-            return False, f"No position — waiting for oversold (RSI={rsi:.1f})"
+            # Case 3: Ultra Scalper Mode -> Always look for entries
+            return True, (
+                f"🔍 Aggressive Scalping (RSI={rsi:.1f}) "
+                f"— wake AI for continuous buy evaluation"
+            )
 
     # ── Signal Filter ─────────────────────────────────────────────────────────
 
@@ -522,34 +543,73 @@ class WatcherEngine:
 
     # ── Price Extraction ──────────────────────────────────────────────────────
 
-    def _extract_price(self, market_state: dict) -> Optional[float]:
-        """อ่านราคาทองจาก MTS แบบ defensive — คืน None ถ้าข้อมูลไม่ครบหรือผิดพลาด"""
+    def _extract_mid_price_per_gram(self, market_state: dict) -> Optional[float]:
+        """Mid price for movement detection and cooldown checks."""
+        return self._extract_price_field_per_gram(
+            market_state,
+            field="mid_price_thb",
+            label="mid_price_thb",
+            fallback_fields=("sell_price_thb",),
+        )
+
+    def _extract_buy_execution_price_per_gram(self, market_state: dict) -> Optional[float]:
+        """Dealer ask/sell price: price the bot pays when buying."""
+        return self._extract_price_field_per_gram(
+            market_state,
+            field="sell_price_thb",
+            label="BUY execution ask/sell_price_thb",
+        )
+
+    def _extract_sell_execution_price_per_gram(self, market_state: dict) -> Optional[float]:
+        """Dealer bid/buy-back price: price the bot receives when selling."""
+        return self._extract_price_field_per_gram(
+            market_state,
+            field="buy_price_thb",
+            label="SELL execution bid/buy_price_thb",
+        )
+
+    def _extract_price_field_per_gram(
+        self,
+        market_state: dict,
+        *,
+        field: str,
+        label: str,
+        fallback_fields: tuple[str, ...] = (),
+    ) -> Optional[float]:
+        """Read a THB-per-baht-weight price and convert to THB/gram exactly once."""
+        raw_price = None
         try:
             thai_gold_data = market_state.get("market_data", {}).get("thai_gold_thb", {})
-            raw_price = thai_gold_data.get("sell_price_thb")
-            
-            # ตรวจสอบว่าดึงราคามาได้หรือไม่
+            raw_price = thai_gold_data.get(field)
             if raw_price is None:
-                self.log("⚠️ Could not find 'sell_price_thb' in market_state", "WARNING")
-                return None
-                
-            # แปลงเป็น float (เผื่อได้มาเป็น string จาก API)
-            price_thb = float(raw_price)
-            
-            # ป้องกันกรณี API ส่งค่าแปลกๆ (เช่น ราคาติดลบ หรือ 0)
-            if price_thb <= 0:
-                self.log(f"⚠️ Invalid price received: {price_thb}", "WARNING")
+                for fallback_field in fallback_fields:
+                    raw_price = thai_gold_data.get(fallback_field)
+                    if raw_price is not None:
+                        self.log(
+                            f"⚠️ Missing {label}; using fallback {fallback_field}",
+                            "WARNING",
+                        )
+                        break
+
+            if raw_price is None:
+                self.log(f"⚠️ Could not find '{field}' in market_state", "WARNING")
                 return None
 
-            # แปลงราคาทองรูปพรรณ/แท่ง (บาททองคำ) เป็นราคาทองต่อกรัม
-            price_per_gram = price_thb / GOLD_BAHT_TO_GRAM
-            return price_per_gram
+            price_thb = float(raw_price)
+            if price_thb <= 0:
+                self.log(f"⚠️ Invalid {label} received: {price_thb}", "WARNING")
+                return None
+
+            return price_thb / GOLD_BAHT_TO_GRAM
 
         except (TypeError, ValueError) as e:
-            self.log(f"⚠️ Price parse error (invalid format): {e} | Raw value: {raw_price}", "ERROR")
+            self.log(
+                f"⚠️ Price parse error for {label}: {e} | Raw value: {raw_price}",
+                "ERROR",
+            )
             return None
         except Exception as e:
-            self.log(f"⚠️ Unexpected error in _extract_price: {e}", "ERROR")
+            self.log(f"⚠️ Unexpected error while reading {label}: {e}", "ERROR")
             return None
 
     # ── Trailing Stop ─────────────────────────────────────────────────────────

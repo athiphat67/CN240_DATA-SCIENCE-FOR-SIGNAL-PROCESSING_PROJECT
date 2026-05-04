@@ -21,6 +21,8 @@ from datetime import datetime  # ✅ [FIX] เพิ่มเพื่อใช�
 logger = logging.getLogger(__name__)
 
 GRAMS_PER_BAHT_WEIGHT: float = 15.244
+TROY_OUNCE_GRAMS: float = 31.1035
+THAI_GOLD_PURITY: float = 0.965
 
 # ── Profit/Loss Thresholds ─────────────────────────────────────────────────────
 # ยอมขาดทุนได้ไม่เกินนี้ (บาท) — ถ้าขาดทุนมากกว่านี้รอให้ราคาขึ้นก่อน
@@ -105,10 +107,11 @@ class RiskManager:
             thai_gold      = market_state["market_data"]["thai_gold_thb"]
             buy_price_thb  = float(thai_gold["sell_price_thb"])
             sell_price_thb = float(thai_gold["buy_price_thb"])
-            atr_value      = float(
-                market_state.get("technical_indicators", {})
-                            .get("atr", {})
-                            .get("value", 0)
+            atr_data       = market_state.get("technical_indicators", {}).get("atr", {}) or {}
+            atr_value      = self._atr_to_thb_per_baht_gold(
+                float(atr_data.get("value", 0) or 0),
+                str(atr_data.get("unit", "") or ""),
+                market_state,
             )
         except (KeyError, ValueError):
             return self._reject_signal({"rationale": market_context}, "Data Error")
@@ -162,13 +165,6 @@ class RiskManager:
                 else:
                     logger.debug(f"[TrailingSL] Waiting: price ฿{check_price:,.0f} < activation ฿{activation_price:,.0f}")
 
-            # [v4.1] ดึง TP/SL จาก portfolio DB (ค่าเหล่านี้ถูกบันทึกตอน BUY ไว้แล้ว)
-            tp_price = float(portfolio.get("take_profit_price") or 0.0)
-            base_sl  = float(portfolio.get("stop_loss_price")   or 0.0)
-
-            if self._active_trailing_sl == 0.0:
-                self._active_trailing_sl = base_sl
-
             override_reason = None
             if tp_price > 0 and check_price >= tp_price:
                 override_reason = f"TP hit: ฿{check_price:,.0f}"
@@ -210,7 +206,13 @@ class RiskManager:
             spread_cov = market_data.get("spread_coverage", {}) if isinstance(market_data, dict) else {}
             expected_move_thb = float(spread_cov.get("expected_move_thb", 0.0) or 0.0)
             effective_spread = float(spread_cov.get("effective_spread", spread_thb) or spread_thb)
+            used_spread_fallback = False
+            if effective_spread <= 0:
+                effective_spread = spread_thb
+                used_spread_fallback = True
             edge_score = float(spread_cov.get("edge_score", 0.0) or 0.0)
+            if used_spread_fallback and effective_spread > 0 and expected_move_thb > 0:
+                edge_score = expected_move_thb / effective_spread
 
             if effective_spread > 0 and expected_move_thb <= 0:
                 # [BUG 1 FIX] ใช้ ATR เป็น expected move หลัก (น่าเชื่อถือกว่า trend_pct)
@@ -337,9 +339,8 @@ class RiskManager:
             final_decision["position_size_thb"]  = round(investment_thb, 2)
             final_decision["stop_loss"]          = round(buy_price_thb - sl_distance, 2)
             final_decision["take_profit"]        = round(buy_price_thb + tp_distance, 2)
-            # [v4.1] แนบ TP/SL ไว้ใน final_decision เพื่อให้ main.py นำไปอัปเดต portfolio DB
-            final_decision["take_profit_price"]  = round(buy_price_thb + tp_distance, 2)
-            final_decision["stop_loss_price"]    = round(buy_price_thb - sl_distance, 2)
+            
+            pass
 
             # [V5] บันทึก entry state สำหรับ trailing stop activation
             self._active_trailing_sl = 0.0
@@ -404,10 +405,8 @@ class RiskManager:
             
             final_decision["entry_price"]       = sell_price_thb
             final_decision["position_size_thb"] = round(gold_value_thb, 2)
-            # [v4.1] เคลียร์ TP/SL price เมื่อ SELL เพื่อให้ main.py
-            # อัปเดตลงฐานข้อมูลให้เป็น None (รีเซ็ตสถานะ)
-            final_decision["take_profit_price"] = None
-            final_decision["stop_loss_price"]   = None
+
+            pass
 
             logger.info(f"RiskManager Approved SELL: {gold_value_thb:.2f} THB")
             return final_decision
@@ -417,6 +416,26 @@ class RiskManager:
     # ─────────────────────────────────────────────────────────────────────────
     # Private helpers
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _atr_to_thb_per_baht_gold(self, atr_value: float, atr_unit: str, market_state: dict) -> float:
+        if atr_value <= 0:
+            return atr_value
+
+        if atr_unit == "USD_PER_OZ":
+            usd_thb = float(
+                market_state.get("market_data", {})
+                            .get("forex", {})
+                            .get("usd_thb", 0.0) or 0.0
+            )
+            if usd_thb <= 0:
+                logger.warning("[RiskManager] ATR unit is USD_PER_OZ but usd_thb is missing; using raw ATR")
+                return atr_value
+            return atr_value * usd_thb / TROY_OUNCE_GRAMS * GRAMS_PER_BAHT_WEIGHT * THAI_GOLD_PURITY
+
+        if atr_unit and atr_unit != "THB_PER_BAHT_GOLD":
+            logger.warning("[RiskManager] Unknown ATR unit '%s'; using raw ATR", atr_unit)
+
+        return atr_value
 
     def _reset_trailing_state(self) -> None:
         self._active_trailing_sl = 0.0

@@ -19,7 +19,7 @@ import json
 import numpy as np
 import asyncio
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from datetime import datetime, timezone
 from agent_core.core.prompt import AIRole
 from logs.logger_setup import sys_logger, log_method
@@ -34,6 +34,7 @@ from ui.core.utils import validate_portfolio_update
 from notification.discord_notifier import DiscordNotifier
 from notification.telegram_notifier import TelegramNotifier
 from data_engine.tools.tool_registry import TOOL_REGISTRY
+from data_engine.thailand_timestamp import get_thai_time
 
 from agent_core.core.risk import RiskManager
 from datetime import datetime
@@ -118,6 +119,87 @@ def _normalize_provider(provider: str) -> str:
         return normalized
     # ไม่เจอ → คืนตัวเดิม (ให้ validate ทีหลัง)
     return provider
+
+
+DAILY_TARGET_ENTRIES = 100
+QUOTA_CONFIDENCE_LADDER = (0.35, 0.50, 0.55)
+QUOTA_POSITION_LADDER_THB = (1000, 1000, 1000)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _current_quota_slot() -> int:
+    hour = get_thai_time().hour
+    if hour < 12:
+        return 1
+    if hour < 18:
+        return 2
+    return 3
+
+
+def build_execution_quota_from_portfolio(
+    portfolio: Optional[Dict[str, Any]],
+    *,
+    session_gate: Optional[Dict[str, Any]] = None,
+    source: str = "database",
+) -> Dict[str, Any]:
+    """
+    Build execution quota only after runtime portfolio/session context is known.
+
+    The data orchestrator must stay market-data only; quota depends on persisted
+    portfolio counters and optional SessionGate context from the service layer.
+    """
+    portfolio = portfolio if isinstance(portfolio, dict) else {}
+    session_gate = session_gate if isinstance(session_gate, dict) else {}
+
+    trades_today = max(0, _safe_int(portfolio.get("trades_today", 0)))
+    trades_this_session = max(0, _safe_int(portfolio.get("trades_this_session", 0)))
+    entries_remaining = max(0, DAILY_TARGET_ENTRIES - trades_today)
+    quota_met = trades_today >= DAILY_TARGET_ENTRIES
+
+    current_slot = _current_quota_slot()
+    min_entries_by_now = max(0, current_slot - 1)
+    next_slot_index = min(trades_today, len(QUOTA_CONFIDENCE_LADDER) - 1)
+    recommended_position = (
+        0 if quota_met else QUOTA_POSITION_LADDER_THB[next_slot_index]
+    )
+
+    quota = {
+        "source": source,
+        "computed_at": get_thai_time().isoformat(),
+        "portfolio_updated_at": portfolio.get("updated_at"),
+        "daily_target_entries": DAILY_TARGET_ENTRIES,
+        "entries_done": trades_today,
+        "entries_done_today": trades_today,
+        "entries_remaining": entries_remaining,
+        "quota_met": quota_met,
+        "trades_today": trades_today,
+        "trades_this_session": trades_this_session,
+        "trades_this_session_source": portfolio.get("trades_this_session_source"),
+        "current_slot": current_slot,
+        "min_entries_by_now": min_entries_by_now,
+        "required_confidence_for_next_buy": QUOTA_CONFIDENCE_LADDER[next_slot_index],
+        "recommended_next_position_thb": recommended_position,
+    }
+
+    if session_gate:
+        quota.update({
+            "session_id": session_gate.get("session_id"),
+            "quota_group_id": session_gate.get("quota_group_id"),
+            "session_start_iso": session_gate.get("session_start_iso"),
+            "minutes_to_session_end": session_gate.get("minutes_to_session_end"),
+            "session_quota_urgent": bool(session_gate.get("quota_urgent", False)),
+            "emergency_mode": session_gate.get("emergency_mode"),
+        })
+
+    return quota
+
+    
 
 
 # ─────────────────────────────────────────────
@@ -290,11 +372,26 @@ class AnalysisService:
                     history_days=_PERIOD_TO_DAYS.get(period, 90), 
                     interval=interval, 
                     save_to_file=True,
-                    recent_trades=recent_trades
                 )
 
                 if not market_state or "market_data" not in market_state:
                     raise ValueError("Failed to fetch market data")
+
+                data_quality = market_state.get("data_quality", {}) or {}
+                if (
+                    data_quality.get("source") == "supabase_hsh_ig"
+                    and (
+                        data_quality.get("status") != "ok"
+                        or bool(data_quality.get("stale", False))
+                    )
+                ):
+                    raise ValueError(
+                        "Supabase HSH/IG market data not usable: "
+                        f"status={data_quality.get('status')} "
+                        f"stale={data_quality.get('stale')} "
+                        f"age_seconds={data_quality.get('age_seconds')} "
+                        f"warnings={data_quality.get('warnings', [])}"
+                    )
 
                 sys_logger.info("Market data fetched successfully")
                 
@@ -314,15 +411,22 @@ class AnalysisService:
                     # ถ้าพังก็ไม่เป็นไร เพราะถ้าไม่มี key "pre_fetched_tools" 
                     # ReAct Loop จะทำงาน 3 Iterations ตามปกติ (Fallback ที่ปลอดภัย)
 
-                # Attach portfolio to market state
+                market_state["recent_trades"] = recent_trades
+
+                # Attach runtime portfolio to market state from DB/defaults.
                 portfolio = None
+                portfolio_source = "default_portfolio"
 
                 if self.persistence:
                     portfolio = self.persistence.get_portfolio()
+                    if portfolio:
+                        portfolio_source = "database"
 
                 if not portfolio:
                     from ui.core.config import DEFAULT_PORTFOLIO
                     portfolio = DEFAULT_PORTFOLIO.copy()
+                else:
+                    portfolio = dict(portfolio)
 
                 market_state["portfolio"] = portfolio
 
@@ -385,7 +489,18 @@ class AnalysisService:
                     "bias": bias
                 }
 
-                sys_logger.info("Portfolio merged into market state + compact summary")
+                market_state["execution_quota"] = build_execution_quota_from_portfolio(
+                    portfolio,
+                    source=portfolio_source,
+                )
+
+                sys_logger.info(
+                    "Portfolio/quota merged into market state "
+                    "(source=%s, entries_done=%s, remaining=%s)",
+                    portfolio_source,
+                    market_state["execution_quota"].get("entries_done"),
+                    market_state["execution_quota"].get("entries_remaining"),
+                )
 
                 # 🎯 [MTF Phase 2] Classify Market Regime from trend_analysis
                 try:
@@ -660,14 +775,55 @@ class AnalysisService:
             market_state["interval"] = interval
             gate_res = resolve_session_gate(force_bypass=bypass_session_gate)
             
-            # ✅ ดึง trades_this_session จาก Portfolio โดยตรง (รอ frontend อัปเดต manual)
-            _trades_this_session = int(
-                market_state.get("portfolio", {}).get("trades_this_session", 0) or 0
+            _portfolio_for_gate = market_state.get("portfolio", {})
+            _trades_this_session, _trades_this_session_source = (
+                self._resolve_session_trade_count(_portfolio_for_gate, gate_res)
+            )
+            if isinstance(_portfolio_for_gate, dict):
+                _portfolio_for_gate["trades_this_session"] = _trades_this_session
+                _portfolio_for_gate["trades_this_session_source"] = (
+                    _trades_this_session_source
+                )
+            _gold_grams_for_gate = float(
+                (_portfolio_for_gate.get("gold_grams", 0.0) or 0.0)
+                if isinstance(_portfolio_for_gate, dict)
+                else 0.0
             )
             # พิมพ์ออก Console โดยตรงเพื่อให้ตรวจสอบได้ง่าย
-            print(f"\n📊 [PORTFOLIO CHECK] Trades in this session: {_trades_this_session}")
-            sys_logger.info(f"[Session Quota] Pulled trades_this_session from portfolio: {_trades_this_session} trades")
-            attach_session_gate_to_market_state(market_state, gate_res, trades_this_session=_trades_this_session)
+            print(
+                f"\n📊 [SESSION CHECK] Trades in this session: "
+                f"{_trades_this_session} ({_trades_this_session_source})"
+            )
+            sys_logger.info(
+                "[Session Quota] Resolved trades_this_session=%s source=%s "
+                "session_start=%s",
+                _trades_this_session,
+                _trades_this_session_source,
+                getattr(gate_res, "session_start_iso", None),
+            )
+            attach_session_gate_to_market_state(
+                market_state,
+                gate_res,
+                trades_this_session=_trades_this_session,
+                gold_grams=_gold_grams_for_gate,
+            )
+            _quota_source = (
+                market_state.get("execution_quota", {}).get("source")
+                or "database"
+            )
+            market_state["execution_quota"] = build_execution_quota_from_portfolio(
+                market_state.get("portfolio", {}),
+                session_gate=market_state.get("session_gate", {}),
+                source=_quota_source,
+            )
+            sys_logger.info(
+                "[ExecutionQuota] Finalized after SessionGate: source=%s "
+                "entries_done=%s trades_this_session=%s session=%s",
+                _quota_source,
+                market_state["execution_quota"].get("entries_done"),
+                market_state["execution_quota"].get("trades_this_session"),
+                market_state["execution_quota"].get("session_id"),
+            )
             
             # ═══════════════════════════════════════════
             # GATE-2 │ services.py → หลัง data_orchestrator.run()
@@ -720,6 +876,13 @@ class AnalysisService:
             try:
                 _ti        = market_state.get("technical_indicators", {})
                 _atr_node  = _ti.get("atr", {})
+                _atr_unit   = str(_atr_node.get("unit", ""))
+                if _atr_unit == "THB_PER_BAHT_GOLD":
+                    sys_logger.info(
+                        f"[{interval}] ATR already in THB_PER_BAHT_GOLD; "
+                        "skipping USD/oz conversion"
+                    )
+                    raise StopIteration
                 _atr_usd   = float(_atr_node.get("value", 0))
                 _usd_thb   = float(
                     market_state.get("market_data", {})
@@ -767,6 +930,8 @@ class AnalysisService:
                 # print(f"  atr/spot ratio      = {_atr_usd/_spot if _spot else 'DIV/0'}")
                 # print("="*60 + "\n")
 
+            except StopIteration:
+                pass
             except Exception as _atr_err:
                 sys_logger.warning(
                     f"[{interval}] ATR conversion failed: {_atr_err} "
@@ -787,8 +952,25 @@ class AnalysisService:
                 "SIDEWAYS":  AIRole.RANGE_BOUND_SNIPER,
                 "DOWNTREND": AIRole.DEFENSIVE_SCAVENGER,
             }
-            selected_role = _REGIME_TO_ROLE.get(_regime, AIRole.ANALYST)
-            sys_logger.info(f"[MTF] Regime={_regime} → Role={selected_role.value}")
+            _session_gate = market_state.get("session_gate", {}) or {}
+            _emergency_mode = _session_gate.get("emergency_mode")
+            if _emergency_mode == "forced_buy":
+                selected_role = AIRole.AGGRESSIVE_BULLISH
+                sys_logger.warning(
+                    "[EmergencySession] forced_buy -> Role=%s (%s)",
+                    selected_role.value,
+                    _session_gate.get("emergency_reason"),
+                )
+            elif _emergency_mode == "forced_sell":
+                selected_role = AIRole.DEFENSIVE_SCAVENGER
+                sys_logger.warning(
+                    "[EmergencySession] forced_sell -> Role=%s (%s)",
+                    selected_role.value,
+                    _session_gate.get("emergency_reason"),
+                )
+            else:
+                selected_role = _REGIME_TO_ROLE.get(_regime, AIRole.ANALYST)
+                sys_logger.info(f"[MTF] Regime={_regime} → Role={selected_role.value}")
 
             prompt_builder = PromptBuilder(self.role_registry, selected_role)
             if quota_urgent_fast:
@@ -893,6 +1075,51 @@ class AnalysisService:
             }
             
             slim_state = self.data_orchestrator.pack(market_state)
+
+            _portfolio_trades = (
+                market_state.get("portfolio", {}).get("trades_this_session")
+            )
+            _session_gate = market_state.get("session_gate", {}) or {}
+            _execution_quota = market_state.get("execution_quota", {}) or {}
+            _slim_session_gate = slim_state.get("session_gate", {}) or {}
+            _slim_execution_quota = slim_state.get("execution_quota", {}) or {}
+            _session_gate_present = bool(market_state.get("session_gate"))
+            _slim_session_gate_present = bool(slim_state.get("session_gate"))
+            _session_gate_trades = (
+                _session_gate.get("trades_this_session")
+                if _session_gate_present
+                else _portfolio_trades
+            )
+            _slim_session_gate_trades = (
+                _slim_session_gate.get("trades_this_session")
+                if _slim_session_gate_present
+                else _portfolio_trades
+            )
+            _pre_llm_state_check = {
+                "portfolio.trades_this_session": _portfolio_trades,
+                "session_gate.present": _session_gate_present,
+                "session_gate.apply_gate": _session_gate.get("apply_gate", False),
+                "session_gate.trades_this_session": _session_gate_trades,
+                "execution_quota.trades_this_session": _execution_quota.get("trades_this_session"),
+                "session_gate.emergency_mode": _session_gate.get("emergency_mode"),
+                "execution_quota.source": _execution_quota.get("source"),
+                "slim_state.session_gate.present": _slim_session_gate_present,
+                "slim_state.session_gate.trades_this_session": _slim_session_gate_trades,
+                "slim_state.execution_quota.trades_this_session": _slim_execution_quota.get("trades_this_session"),
+                "slim_state.session_gate.emergency_mode": _slim_session_gate.get("emergency_mode"),
+                "slim_state.execution_quota.source": _slim_execution_quota.get("source"),
+                "aligned": (
+                    _portfolio_trades
+                    == _session_gate_trades
+                    == _execution_quota.get("trades_this_session")
+                    == _slim_session_gate_trades
+                    == _slim_execution_quota.get("trades_this_session")
+                ),
+            }
+            sys_logger.info(
+                "[PreLLM StateCheck] %s",
+                json.dumps(_pre_llm_state_check, ensure_ascii=False, default=str),
+            )
             
             react_result = react_orchestrator.run(
                 market_state=slim_state,
@@ -934,7 +1161,6 @@ class AnalysisService:
 
             # ─── Guard: ถ้า final_decision เป็น JSON string ให้ parse ───
             if isinstance(decision, str):
-                import json
                 try:
                     decision = json.loads(decision)
                     sys_logger.warning(f"[{interval}] final_decision was a JSON string — parsed OK")
@@ -1031,6 +1257,54 @@ class AnalysisService:
             return f"Invalid intervals: {intervals}"
 
         return None
+
+    def _resolve_session_trade_count(self, portfolio: dict, gate_res) -> tuple[int, str]:
+        """
+        Resolve trades_this_session from trade_log for the active session.
+
+        portfolio.trades_this_session is treated as a fallback only. A NULL value
+        is never allowed to imply "zero trades" while a DB session can be counted.
+        """
+        if not getattr(gate_res, "apply_gate", False):
+            return 0, "outside_session"
+
+        session_start_iso = getattr(gate_res, "session_start_iso", None)
+        if (
+            self.persistence
+            and session_start_iso
+            and hasattr(self.persistence, "get_trades_count_since")
+        ):
+            try:
+                count = max(
+                    0,
+                    int(self.persistence.get_trades_count_since(session_start_iso) or 0),
+                )
+                if hasattr(self.persistence, "update_trades_this_session"):
+                    try:
+                        self.persistence.update_trades_this_session(count)
+                    except Exception as sync_exc:
+                        sys_logger.warning(
+                            "[Session Quota] Could not sync "
+                            "portfolio.trades_this_session=%s: %s",
+                            count,
+                            sync_exc,
+                        )
+                return count, "trade_log"
+            except Exception as exc:
+                sys_logger.warning(
+                    "[Session Quota] Could not count trades from trade_log "
+                    "since %s: %s",
+                    session_start_iso,
+                    exc,
+                )
+
+        raw_count = portfolio.get("trades_this_session") if isinstance(portfolio, dict) else None
+        if raw_count is None:
+            sys_logger.warning(
+                "[Session Quota] portfolio.trades_this_session is NULL and "
+                "trade_log count is unavailable; using explicit 0 fallback"
+            )
+        return max(0, _safe_int(raw_count, 0)), "portfolio_fallback"
 
     @staticmethod
     def _detect_market_regime(trend_analysis: dict) -> str:
