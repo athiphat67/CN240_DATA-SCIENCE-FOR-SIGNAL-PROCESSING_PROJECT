@@ -7,7 +7,7 @@ annotated-types==0.7.0
 anthropic==0.86.0
 anyio==4.13.0
 attrs==26.1.0
-audioop-lts==0.2.2
+#audioop-lts==0.2.2
 beautifulsoup4==4.14.3
 bidict==0.23.1
 brotli==1.2.0

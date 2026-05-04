@@ -355,6 +355,45 @@ def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
 
     คืน `Decision` สุดท้ายที่ตัดสินใจ
     """
+    โหลดค่า trailing_stop_level_thb จาก portfolio มาตั้งค่าให้ RiskManager
+    ป้องกันการสูญเสียสถานะ Trailing Stop เมื่อ process รีสตาร์ท
+
+    [FIX #1] เรียก public method restore_trailing_stop() แทนการแก้ private attr โดยตรง
+    → RiskManager ต้องมี method นี้ (ดูตัวอย่างใน docstring ด้านล่าง)
+
+    ตัวอย่าง method ที่ต้องเพิ่มใน RiskManager:
+        def restore_trailing_stop(self, level_thb: float) -> None:
+            \"\"\"โหลดสถานะ trailing stop จาก persistent storage\"\"\"
+            if level_thb > 0:
+                self._active_trailing_sl = level_thb
+                logger.info(f"[RiskManager] trailing stop restored: ฿{level_thb:,.0f}")
+    """
+    raw = portfolio.get("trailing_stop_level_thb")
+    if raw is None:
+        return
+    try:
+        level = float(raw)
+        if level <= 0:
+            return
+
+        # ── [FIX #1] ใช้ public method แทน private attr ─────
+        if hasattr(risk_manager, "restore_trailing_stop"):
+            risk_manager.restore_trailing_stop(level)
+            sys_logger.info(f"[trailing_stop] Restored via public method: ฿{level:,.0f}")
+        else:
+            # Fallback: เตือนและใช้ private attr ชั่วคราวเพื่อไม่ให้ระบบพัง
+            # TODO: เพิ่ม restore_trailing_stop() ใน RiskManager แล้วลบบรรทัดนี้ออก
+            sys_logger.warning(
+                "[trailing_stop] RiskManager.restore_trailing_stop() not found — "
+                "falling back to direct attr access. Please add the public method."
+            )
+            risk_manager._active_trailing_sl = level  # type: ignore[attr-defined]
+            sys_logger.info(f"[trailing_stop] Restored via fallback: ฿{level:,.0f}")
+    except Exception as exc:
+        sys_logger.error(f"[trailing_stop] restore failed: {exc}")
+
+
+def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
     cycle_start = time.perf_counter()
 
     # ── 1. Data Engine ─────────────────────────────────────────
@@ -405,6 +444,7 @@ def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
             reject_reason=f"feature_error:{exc}",
             notify=False,
         )
+
 
     # ── 3. Dual-model XGBoost prediction → (signal, confidence)
     sys_logger.info("🟢[cycle] (3/5) XGBoost dual-model predict_proba")
@@ -472,6 +512,7 @@ def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
         "─" * 60,
     )
     return decision
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -645,6 +686,7 @@ def _notify_if_pass(
             sys_logger.error(f"[notify] telegram failed: {exc}")
 
 
+
 def _persist_run(
     rt: Runtime, decision: Decision, market_state: Dict[str, Any]
 ) -> Optional[int]:
@@ -676,23 +718,6 @@ def _persist_run(
                     sys_logger.info(f"[persist] session_quota mark_sell: session={session_id}")
             except Exception as sq_err:
                 sys_logger.error(f"[persist] session_quota update failed: {sq_err}")
-
-        # ── [v4.1] อัปเดต take_profit_price / stop_loss_price ลง portfolio ──
-        # BUY  → บันทึก TP/SL ที่คำนวณได้ เพื่อให้ RiskManager ใช้ Gate 0b
-        # SELL → เคลียร์ค่า TP/SL (= None) เพื่อรีเซ็ตสถานะ
-        if decision.notify and decision.final in ("BUY", "SELL"):
-            try:
-                portfolio_snap = rt.database.get_portfolio()
-                portfolio_snap["take_profit_price"] = decision.take_profit_price
-                portfolio_snap["stop_loss_price"]   = decision.stop_loss_price
-                rt.database.save_portfolio(portfolio_snap)
-                sys_logger.info(
-                    "[persist] portfolio TP/SL updated: tp=%s sl=%s",
-                    decision.take_profit_price,
-                    decision.stop_loss_price,
-                )
-            except Exception as tp_err:
-                sys_logger.error(f"[persist] portfolio TP/SL update failed: {tp_err}")
 
         return run_id
     except Exception as exc:
@@ -741,6 +766,10 @@ def send_trade_log_from_result(
             sys_logger.error(f"[trade_log] failed: {exc}")
 
 
+# backward-compat alias (Team-Watch_Engine ใช้ชื่อนี้)
+_send_trade_log = send_trade_log_from_result
+
+
 # ─────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────
@@ -785,7 +814,7 @@ def _build_watcher(rt: Runtime) -> Optional[Any]:
             watcher_config={
                 "provider": PROVIDER_TAG,
                 "period": "1d",
-                "interval": "5m",
+                "interval": "1m",
                 "cooldown_minutes": 5,
                 "min_price_step": 1.5,
                 "rsi_oversold": 30.0,
@@ -925,6 +954,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     _install_signal_handlers()
 
+    sys_logger.info("═" * 60)
+    sys_logger.info("  ⛏️  นักขุดทอง v2.1  —  XGBoost Gold Signal Loop")
+    sys_logger.info("─" * 60)
+    sys_logger.info("  💰 capital    ฿%s", f"{INITIAL_CAPITAL_THB:,.0f}")
+    sys_logger.info("  ⏱  interval   %ss", args.interval)
+    sys_logger.info("  🤖 model_buy  %s", args.model_buy)
+    sys_logger.info("  🤖 model_sell %s", args.model_sell)
+    sys_logger.info("  📐 features   %s", args.feature_schema)
+    sys_logger.info(
+        "  🔧 flags      skip_fetch=%s  no_save=%s  once=%s",
+        args.skip_fetch, args.no_save, args.once,
+    )
+    sys_logger.info("═" * 60)
+
     try:
         rt = build_runtime(
             model_buy_path=args.model_buy,
@@ -936,29 +979,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception as exc:
         sys_logger.exception(f"[main] build_runtime failed: {exc}")
         return 2
-
-    # ── Display Banner (ดึงทุนจริงจาก DB ถ้ามี) ──────────────────
-    current_cash = INITIAL_CAPITAL_THB
-    if rt.database is not None:
-        try:
-            portfolio = rt.database.get_portfolio()
-            current_cash = float(portfolio.get("cash_balance", INITIAL_CAPITAL_THB))
-        except Exception:
-            pass
-
-    sys_logger.info("═" * 60)
-    sys_logger.info("  ⛏️  นักขุดทอง v2.1  —  XGBoost Gold Signal Loop")
-    sys_logger.info("─" * 60)
-    sys_logger.info("  💰 capital    ฿%s", f"{current_cash:,.2f}")
-    sys_logger.info("  ⏱  interval   %ss", args.interval)
-    sys_logger.info("  🤖 model_buy  %s", args.model_buy)
-    sys_logger.info("  🤖 model_sell %s", args.model_sell)
-    sys_logger.info("  📐 features   %s", args.feature_schema)
-    sys_logger.info(
-        "  🔧 flags      skip_fetch=%s  no_save=%s  once=%s",
-        args.skip_fetch, args.no_save, args.once,
-    )
-    sys_logger.info("═" * 60)
 
     try:
         main_loop(
