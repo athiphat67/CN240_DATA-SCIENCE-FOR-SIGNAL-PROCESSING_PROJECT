@@ -257,12 +257,12 @@ def send_trade_log_from_result(result: dict, *, emit_logs: bool = True) -> None:
     print(f"Price:  {price}")
     print(f"Reason: {rationale}")
 
-    send_trade_log(
-        action=action,
-        price=price,
-        reason=rationale,
-        api_key=team_api_key,
-    )
+    # send_trade_log(
+    #     action=action,
+    #     price=price,
+    #     reason=rationale,
+    #     api_key=team_api_key,
+    # )
 
 
 # ─────────────────────────────────────────────────────────────

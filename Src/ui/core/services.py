@@ -1004,75 +1004,75 @@ class AnalysisService:
             current_session = gate_res.session_id if gate_res.apply_gate else "Morning"
             is_market_open = gate_res.apply_gate
 
-            # 2. สร้าง Predictor
-            predictor = XGBoostPredictor(
-                repo_id="athiphatss/Xgboost_HSH965_gold_trading_signal",
-                filename="feature_columns.json"
-            )
+            # # 2. สร้าง Predictor
+            # predictor = XGBoostPredictor(
+            #     repo_id="athiphatss/Xgboost_HSH965_gold_trading_signal",
+            #     filename="feature_columns.json"
+            # )
 
-            # 3. เตรียม features_dict
-            features_dict = {
-                "xauusd_open": market_state.get("market_data", {}).get("ohlcv", {}).get("open", 0.0),
-                "xauusd_high": market_state.get("market_data", {}).get("ohlcv", {}).get("high", 0.0),
-                "xauusd_low": market_state.get("market_data", {}).get("ohlcv", {}).get("low", 0.0),
-                "xauusd_close": market_state.get("market_data", {}).get("ohlcv", {}).get("close", 0.0),
-                "hour_sin": np.sin(2 * np.pi * datetime.now().hour / 24),
-                "hour_cos": np.cos(2 * np.pi * datetime.now().hour / 24),
-                "day_of_week": datetime.now().weekday(),
-            }
+            # # 3. เตรียม features_dict
+            # features_dict = {
+            #     "xauusd_open": market_state.get("market_data", {}).get("ohlcv", {}).get("open", 0.0),
+            #     "xauusd_high": market_state.get("market_data", {}).get("ohlcv", {}).get("high", 0.0),
+            #     "xauusd_low": market_state.get("market_data", {}).get("ohlcv", {}).get("low", 0.0),
+            #     "xauusd_close": market_state.get("market_data", {}).get("ohlcv", {}).get("close", 0.0),
+            #     "hour_sin": np.sin(2 * np.pi * datetime.now().hour / 24),
+            #     "hour_cos": np.cos(2 * np.pi * datetime.now().hour / 24),
+            #     "day_of_week": datetime.now().weekday(),
+            # }
 
-            # 4. รัน Predictor เพื่อเอา XGBoost Signal
-            xgb_out = predictor.predict(features_dict, session=current_session)
-            # print(xgb_out)
+            # # 4. รัน Predictor เพื่อเอา XGBoost Signal
+            # xgb_out = predictor.predict(features_dict, session=current_session)
+            # # print(xgb_out)
             
-            # --- [NEW] 5. คำนวณ Dynamic Weights ---
-            # ดึงทิศทางจาก 3 แหล่ง
-            xgb_dir = str(getattr(xgb_out, "signal", "HOLD")).upper()
+            # # --- [NEW] 5. คำนวณ Dynamic Weights ---
+            # # ดึงทิศทางจาก 3 แหล่ง
+            # xgb_dir = str(getattr(xgb_out, "signal", "HOLD")).upper()
             
-            news_score = market_state.get("news", {}).get("sentiment_score", 0.0)
-            news_dir = "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
+            # news_score = market_state.get("news", {}).get("sentiment_score", 0.0)
+            # news_dir = "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
             
-            tech_trend = market_state.get("technical_indicators", {}).get("trend", {}).get("trend", "").lower()
-            tech_dir = "BUY" if "up" in tech_trend else "SELL" if "down" in tech_trend else "HOLD"
+            # tech_trend = market_state.get("technical_indicators", {}).get("trend", {}).get("trend", "").lower()
+            # tech_dir = "BUY" if "up" in tech_trend else "SELL" if "down" in tech_trend else "HOLD"
 
-            # กำหนดน้ำหนักตาม Session
-            if is_market_open and current_session == "Evening":
-                w_xgb, w_news, w_tech = 0.35, 0.45, 0.20
-            elif current_session == "Morning":
-                w_xgb, w_news, w_tech = 0.55, 0.15, 0.30
-            else:
-                w_xgb, w_news, w_tech = 0.50, 0.20, 0.30
+            # # กำหนดน้ำหนักตาม Session
+            # if is_market_open and current_session == "Evening":
+            #     w_xgb, w_news, w_tech = 0.35, 0.45, 0.20
+            # elif current_session == "Morning":
+            #     w_xgb, w_news, w_tech = 0.55, 0.15, 0.30
+            # else:
+            #     w_xgb, w_news, w_tech = 0.50, 0.20, 0.30
 
-            # คำนวณคะแนน
-            bull_score, bear_score = 0.0, 0.0
+            # # คำนวณคะแนน
+            # bull_score, bear_score = 0.0, 0.0
             
-            if xgb_dir == "BUY": bull_score += w_xgb
-            elif xgb_dir == "SELL": bear_score += w_xgb
+            # if xgb_dir == "BUY": bull_score += w_xgb
+            # elif xgb_dir == "SELL": bear_score += w_xgb
             
-            if news_dir == "BUY": bull_score += w_news
-            elif news_dir == "SELL": bear_score += w_news
+            # if news_dir == "BUY": bull_score += w_news
+            # elif news_dir == "SELL": bear_score += w_news
             
-            if tech_dir == "BUY": bull_score += w_tech
-            elif tech_dir == "SELL": bear_score += w_tech
+            # if tech_dir == "BUY": bull_score += w_tech
+            # elif tech_dir == "SELL": bear_score += w_tech
 
-            # สรุปผล
-            if bull_score > bear_score:
-                final_dir, base_conf = "BUY", bull_score
-            elif bear_score > bull_score:
-                final_dir, base_conf = "SELL", bear_score
-            else:
-                # ถ้าคะแนนเท่ากัน ให้ใช้ค่าเฉลี่ยของน้ำหนักที่เหลืออยู่ แทนการล็อค 0.5
-                final_dir, base_conf = "HOLD", (bull_score + bear_score) / 2 if (bull_score + bear_score) > 0 else 0.35
+            # # สรุปผล
+            # if bull_score > bear_score:
+            #     final_dir, base_conf = "BUY", bull_score
+            # elif bear_score > bull_score:
+            #     final_dir, base_conf = "SELL", bear_score
+            # else:
+            #     # ถ้าคะแนนเท่ากัน ให้ใช้ค่าเฉลี่ยของน้ำหนักที่เหลืออยู่ แทนการล็อค 0.5
+            #     final_dir, base_conf = "HOLD", (bull_score + bear_score) / 2 if (bull_score + bear_score) > 0 else 0.35
 
-            # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
-            market_state["dynamic_weights"] = {
-                "session": current_session,
-                "xgb_w": w_xgb,
-                "news_w": w_news,
-                "tech_w": w_tech,
-                "direction": final_dir,
-                "base_confidence": round(base_conf, 2)
-            }
+            # # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
+            # market_state["dynamic_weights"] = {
+            #     "session": current_session,
+            #     "xgb_w": w_xgb,
+            #     "news_w": w_news,
+            #     "tech_w": w_tech,
+            #     "direction": final_dir,
+            #     "base_confidence": round(base_conf, 2)
+            # }
             
             slim_state = self.data_orchestrator.pack(market_state)
 
