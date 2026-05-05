@@ -535,12 +535,13 @@ class RiskManager:
             current_rationale = final_decision.get("rationale", "")
             is_override = any(msg in current_rationale for msg in ["[SYSTEM OVERRIDE]", "[SESSION FORCE SELL]"])
             
-            if not is_override:
-                if unrealized_pnl > 0 and unrealized_pnl < MIN_PROFIT_FILTER:
-                    return self._reject_signal(
-                        final_decision, 
-                        f"กำไร {unrealized_pnl:.2f} THB ยังไม่ถึงเกณฑ์ขั้นต่ำ {MIN_PROFIT_FILTER} THB (ไม่คุ้ม Spread)"
-                    )
+            # [REMOVED] เอาเกณฑ์กำไรขั้นต่ำออกตามคำขอ เพื่อให้ขายได้คล่องตัวขึ้น
+            # if not is_override:
+            #     if unrealized_pnl > 0 and unrealized_pnl < MIN_PROFIT_FILTER:
+            #         return self._reject_signal(
+            #             final_decision, 
+            #             f"กำไร {unrealized_pnl:.2f} THB ยังไม่ถึงเกณฑ์ขั้นต่ำ {MIN_PROFIT_FILTER} THB (ไม่คุ้ม Spread)"
+            #         )
 
             gold_value_thb = gold_grams * (sell_price_thb / 15.244)
             
