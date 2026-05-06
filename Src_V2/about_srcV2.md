@@ -1,155 +1,205 @@
-# 📖 Src_V2 — นักขุดทอง v2.1 (XGBoost-based Gold Trading Signal System)
+# 📖 Src_V2 — คู่มือระบบเทรดทองคำอัตโนมัติฉบับสมบูรณ์ (The Definitive Guide to XGBoost Gold Scalper v2)
 
-## 1. ภาพรวม (Overview)
+## 1. บทนำและภาพรวมของระบบ (Introduction & System Overview)
 
-`Src_V2` คือระบบ **สร้างสัญญาณซื้อ-ขายทองคำไทย** แบบอัตโนมัติ ที่ขับเคลื่อนด้วย **Dual-Model XGBoost** (ไม่ใช่ Generative AI / LLM)
-โดยทำงานเป็น loop ต่อเนื่องทุก 15 นาที ดึงข้อมูลตลาดแบบ real-time แล้วให้โมเดล ML ตัดสินใจว่าควร **BUY**, **SELL** หรือ **HOLD**
+**`Src_V2`** คือระบบสร้างสัญญาณซื้อ-ขายทองคำไทยอัตโนมัติ ที่ถูกพัฒนาต่อยอดมาจาก Src_V1 โดยมีการเปลี่ยนแกนสมองหลักจาก Generative AI (LLM) มาเป็น **Machine Learning (XGBoost)** แบบ Dual-Model เพื่อเพิ่มความรวดเร็ว ความแม่นยำ และลดความผันผวนของการตัดสินใจ (Hallucinations) ที่มักพบใน LLM
 
-### สิ่งที่ระบบทำ (High-Level)
-1. **ดึงข้อมูลตลาด** — ราคาทองไทย (ฮั่วเซ่งเฮง/Intergold), ราคา Spot Gold (XAU/USD), อัตราแลกเปลี่ยน USD/THB, OHLCV, ข่าวสาร
-2. **คำนวณ Technical Indicators** — RSI, MACD, Bollinger Bands, ATR, EMA/Trend
-3. **สกัด Feature Vector** → 26 ตัวแปร ตาม schema `models/feature_columns.json`
-4. **XGBoost Dual-Model Predict** → `model_buy.pkl` + `model_sell.pkl` ทำนาย probability → ตัดสิน BUY/SELL/HOLD
-5. **Gates (Risk + Session)** — กรองสัญญาณผ่าน RiskManager + SessionGate แบบ concurrent
-6. **Market Monitoring** — ใช้ WatcherEngine เฝ้าดูตลาดระหว่าง Sleep เพื่อปลุก AI เมื่อเกิดเหตุการณ์สำคัญ (RSI Extreme, SL Hit)
-7. **แจ้งเตือน + บันทึก** — ส่ง Discord/Telegram (ถ้า ALL PASS) และบันทึกทุกรอบลง PostgreSQL
+ระบบนี้ถูกออกแบบมาเพื่อกลยุทธ์ **Aggressive Scalping** (เทรดสั้น จบไว) โดยมีกลไกที่สลับซับซ้อนในการจัดการโควต้าในแต่ละรอบวัน (Session Quota) การควบคุมความเสี่ยงอย่างเข้มงวด และระบบติดตามผลแบบ Real-time ที่ปลอดภัยระดับ Atomic Transaction
+
+### 🎯 เป้าหมายหลักของการออกแบบ V2
+1. **ความเสถียร (Stability):** ตัดสินใจบนพื้นฐานของตัวเลขและคณิตศาสตร์ (Feature Vectors 26 มิติ) 100% ไม่มีอารมณ์หรือการสร้างเหตุผลลอยๆ
+2. **ความเร็ว (Speed):** ใช้เวลาทำนายผลระดับมิลลิวินาที ทำให้เหมาะกับตลาดที่มีความผันผวนสูง
+3. **การบังคับเทรด (Enforced Participation):** มีระบบ Session Gate ที่บังคับให้ระบบต้องมีส่วนร่วมในตลาดอย่างน้อย 1 ไม้ต่อรอบเวลา เพื่อไม่ให้พลาดโอกาสและรักษา Cash Flow
+4. **ความสมบูรณ์ของข้อมูล (Data Integrity):** ใช้ฐานข้อมูล PostgreSQL เต็มรูปแบบแทนการเก็บ State ลอยๆ เพื่อป้องกันการนับรอบผิดพลาด หรือปัญหา "ทองผีสิง" (Phantom Gold)
 
 ---
 
-## 2. สถาปัตยกรรม (Architecture)
+## 2. สถาปัตยกรรมระบบ (System Architecture)
 
-```
-                          ┌─────────────────────────────┐
-                          │         main.py              │
-                          │    (Orchestration Loop)      │
-                          └──────────┬──────────┬───────┘
-                                     │          │
-            ┌────────────────────────┼──────────┴─────────────┐
-            ▼                        ▼                        ▼
-   ┌─────────────────┐    ┌──────────────────┐     ┌─────────────────────┐
-   │   data_engine/   │    │    ml_core/       │     │    watch_engine/    │
-   │   orchestrator   │    │    signal.py      │     │    watcher.py       │
-   │                  │    │  (XGBoostPredictor)│     │ (Sleep Monitoring)  │
-   └────────┬────────┘    └────────┬─────────┘     └──────────┬──────────┘
-            │                      │                          │
-   ┌────────┴────────┐             │                 ┌────────┴──────────┐
-   │  fetcher.py     │             │                 │ _AnalysisAdapter  │
-   │  indicators.py  │             │                 └────────┬──────────┘
-   │  newsfetcher.py │             │                          │
-   │  ohlcv_fetcher  │             │              ┌───────────▼──────────┐
-   │  interceptor    │             │              │       core.py        │
-   │  extract_features│            │              │    (CoreDecision)    │
-   └─────────────────┘             │              └───────────┬──────────┘
-                                   │                          │
-                     ┌─────────────┴──────────────┐   ┌───────┴──────────┐
-                     │        notification/        │   │     risk.py      │
-                     │  discord_notifier.py        │   │  session_gate.py │
-                     │  telegram_notifier.py       │   └──────────────────┘
-                     └─────────────────────────────┘
-                                   │
-                     ┌─────────────┴──────────────┐
-                     │        database/            │
-                     │  database.py (PostgreSQL)   │
-                     └─────────────────────────────┘
+ระบบถูกออกแบบในลักษณะ **Modular Layered Architecture** โดยมี `main.py` เป็นหัวใจหลักในการรวบรวม (Orchestrate) ทุก Layer เข้าด้วยกัน
+
+```text
+========================================================================================
+                              Src_V2 Architecture
+========================================================================================
+
+[ 1. Data Ingestion Layer ] ──> ดึงข้อมูลดิบจาก API ภายนอก
+    ├─ GoldDataFetcher (ราคาทอง HSH, Intergold, XAUUSD, USDTHB)
+    ├─ OHLCVFetcher (กราฟแท่งเทียน Spot Gold จาก Yahoo/Binance)
+    └─ GoldNewsFetcher (ข่าวเศรษฐกิจ + FinBERT Sentiment Analysis)
+
+[ 2. Feature Engineering Layer ] ──> แปลงข้อมูลดิบเป็นตัวชี้วัดทางคณิตศาสตร์
+    ├─ TechnicalIndicators (RSI, MACD, Bollinger Bands, ATR)
+    └─ FeatureExtractor (รวมและจัดรูปแบบข้อมูลให้เป็น 26 มิติ ตรงตาม Schema)
+
+[ 3. Decision Layer (The Brain) ] ──> ระบบสมองกลตัดสินใจ
+    ├─ XGBoostPredictor (โมเดลแยกอิสระ model_buy.pkl และ model_sell.pkl)
+    └─ RiskManager (V5) + SessionGate (ตรวจสอบกฎการเทรด, ทุน, และโควต้าเวลา)
+
+[ 4. Execution & Logging Layer ] ──> บันทึกและส่งคำสั่ง
+    ├─ RunDatabase (PostgreSQL - บันทึกผล, Atomic Trade, Portfolio)
+    ├─ Discord/Telegram Notifier (แจ้งเตือนผู้ใช้งาน)
+    └─ API Logger (ส่งคำสั่งเทรดจริงไปยัง Server กลาง)
+
+[ 5. Active Monitoring Layer ] ──> ระบบเฝ้าระวังระหว่างหลับ (Sleep)
+    └─ WatcherEngine (สอดส่องตลาดทุก 30 วินาที คอยเลื่อน Trailing Stop หรือทุบขายฉุกเฉิน)
+
+========================================================================================
 ```
 
 ---
 
-## 3. Pipeline Flow (ขั้นตอนการทำงาน)
+## 3. การดึงข้อมูลและเตรียมข้อมูล (Data Ingestion & Feature Engineering)
 
-ระบบมีการทำงาน 2 โหมดขนานกัน:
+ความแม่นยำของ XGBoost ขึ้นอยู่กับคุณภาพของข้อมูล (Garbage In, Garbage Out) ระบบ V2 จึงให้ความสำคัญกับท่อส่งข้อมูล (Data Pipeline) อย่างมาก
 
-### A. Scheduled Cycle (ทุก 15 นาที)
-1. **Fetch → Predict → Decide → Action** ตามปกติ
-2. เมื่อจบ Cycle ระบบจะเข้าสู่โหมด **Sleep**
+### 3.1 ระบบราคาแบบ Hybrid (Hybrid Price Source)
+ระบบราคาทองคำไทย (THB/Gram) เป็นหัวใจของการทำกำไร ระบบจึงมีแผนสำรองเสมอ:
+*   **Primary Source:** ราคาฮั่วเซ่งเฮง (HSH) ผ่าน API 
+*   **Fallback Source:** หาก HSH ล่ม ข้อมูลไม่ตอบสนอง หรือราคาไม่ขยับผิดปกติ ระบบจะสลับไปดึงราคาจาก **Intergold** ทันที เพื่อป้องกันไม่ให้ระบบหยุดชะงัก (Downtime)
+*   **Forex Mapping:** ดึงอัตราแลกเปลี่ยน USD/THB ควบคู่กับ Spot Gold เพื่อหาความผิดปกติของค่า Premium/Discount ในตลาดไทย
 
-### B. Event-Driven Monitoring (ระหว่าง Sleep)
-1. **WatcherEngine** ทำงานเบื้องหลัง (Thread แยก) ตรวจตลาดทุก 30 วินาที
-2. **Trigger Points**: RSI ต่ำ/สูงเกินไป, ราคาชน Trailing Stop, หรือราคาเปลี่ยนแรง
-3. **Action**: ถ้าเข้าเงื่อนไข Watcher จะใช้ **Adapter** ปลุก Loop หลักให้รัน `run_analysis_once` ทันทีโดยไม่ต้องรอนาทีที่ 15
+### 3.2 การคำนวณตัวชี้วัด (Technical Indicators)
+ไฟล์ `data_engine/indicators.py` รับหน้าที่ประมวลผล OHLCV DataFrame เพื่อสร้างตัวชี้วัดเชิงลึก:
+*   **Trend & Momentum:** EMA (Fast/Slow), MACD (Line, Signal, Histogram)
+*   **Volatility:** Bollinger Bands (Upper, Lower, %B) เพื่อดูการบีบอัดของราคา
+*   **Risk Metrics:** ATR (Average True Range) ที่ถูกแปลงเป็นหน่วย **THB/Gram** เพื่อใช้คำนวณระยะ Stop Loss และ Take Profit ที่สอดคล้องกับความผันผวนจริง ไม่ใช่ค่าคงที่
 
----
-
-## 4. โครงสร้างไดเรกทอรี (Directory Structure)
-
-```
-Src_V2/
-├── main.py                     # Entry point — orchestration loop + Watcher integration
-├── core.py                     # CoreDecision (fan-out gates → fan-in)
-├── .env                        # Environment variables (API keys, DB URL)
-├── requirements.txt            # Python dependencies
-│
-├── data_engine/                # === Data Layer ===
-│   ├── orchestrator.py         # GoldTradingOrchestrator — conductor หลัก
-│   ├── fetcher.py              # GoldDataFetcher — ดึงราคา spot, forex, ทองไทย
-│   ├── ohlcv_fetcher.py        # OHLCVFetcher — ดึงกราฟแท่งเทียน
-│   ├── indicators.py           # TechnicalIndicators
-│   ├── extract_features.py     # สกัด 26 features สำหรับ XGBoost
-│   └── newsfetcher.py          # GoldNewsFetcher — ข่าว + FinBERT sentiment
-│
-├── ml_core/                    # === ML / Decision Layer ===
-│   ├── signal.py               # XGBoostPredictor — dual-model predict
-│   ├── risk.py                 # RiskManager — (V5) กฎการเทรดและ Stop Loss
-│   └── session_gate.py         # SessionGate — ตรวจช่วงเวลาเทรด
-│
-├── watch_engine/               # === Monitoring Layer ===
-│   ├── watcher.py              # WatcherEngine — เฝ้าราคาและ RSI ระหว่าง sleep
-│   └── indicators.py           # Indicators สำหรับ watcher
-│
-├── database/                   # === Persistence Layer ===
-│   └── database.py             # RunDatabase — PostgreSQL (connection pool)
-│
-├── notification/               # === Notification Layer ===
-│   ├── discord_notifier.py     
-│   └── telegram_notifier.py    
-│
-└── logs/                       # === Logging & Analytics ===
-    ├── logger_setup.py         # sys_logger configuration
-    └── api_logger.py           # Trade log API sender & result wrappers
-```
+### 3.3 การสกัด Feature (Feature Extraction)
+ก่อนส่งให้โมเดล ข้อมูลทั้งหมดจะถูกบีบอัดและทำ Normalization ให้อยู่ในรูปของ **26 Feature Vectors** ตามที่ระบุไว้ใน `models/feature_columns.json` เช่น `RSI_14`, `MACD_hist`, `BB_pct_B`, `usd_thb_volatility` ฯลฯ
 
 ---
 
-## 5. รายละเอียดแต่ละ Module (อัปเดต v2.1)
+## 4. ระบบสมองกล (Machine Learning Core - XGBoost)
 
-### 5.1 `main.py` — The Heart
-- **Hybrid Loop**: ผสมผสานระบบ Timer (15 นาที) กับ Event-driven (Watcher)
-- **Watcher Integration**: ใช้ `_AnalysisServiceAdapter` เพื่อให้ Watcher สามารถเรียกใช้ Pipeline การวิเคราะห์ของ v2 ได้
-- **Modular Config**: เลิก Hardcode ค่า Risk ใน main แล้วดึงจาก Default ของ `risk.py` แทน
+ต่างจาก V1 ที่โยนข้อมูลให้ LLM อ่านแล้วคิดเอง V2 ใช้วิธี **Dual-Model Approach** ผ่านไลบรารี `xgboost` (ดูใน `ml_core/signal.py`)
 
-### 5.2 `ml_core/risk.py` — RiskManager (Single Source of Truth)
-- เป็นที่เก็บ Config หลักของระบบเทรด (V5 Scalping Edition)
-- **ATR 2.5**, **RRR 1.5**, **Confidence 0.60**, **Max Daily Loss 500 THB**
-- `main.py` จะดึงค่าจากที่นี่ไปใช้โดยตรง
+### 4.1 ทำไมต้อง Dual-Model?
+แทนที่จะมีโมเดลเดียวที่บอกว่า "ซื้อ หรือ ขาย" ระบบแยกสมองออกเป็น 2 ซีก:
+1.  **`model_buy.pkl`:** ถูกเทรนมาเพื่อจับจังหวะ **"ราคาจ่อขึ้น"** โดยเฉพาะ (ส่งออกค่าความมั่นใจ 0.0 - 1.0)
+2.  **`model_sell.pkl`:** ถูกเทรนมาเพื่อจับจังหวะ **"ราคาจ่อลง"** โดยเฉพาะ (ส่งออกค่าความมั่นใจ 0.0 - 1.0)
 
-### 5.3 `logs/api_logger.py` — Unified Logging
-- **Modularized**: ย้ายโค้ดเตรียมข้อมูล Log ออกจาก `main.py` มาไว้ที่นี่
-- ฟังก์ชัน `send_trade_log_from_result` ทำหน้าที่แพ็กข้อมูล Decision และ Market State ส่งเข้า API
+### 4.2 ตรรกะการโหวต (Voting Logic)
+เมื่อได้ความน่าจะเป็น (Probability) จากทั้ง 2 โมเดล ระบบจะนำมาเทียบกัน:
+*   หาก `prob_buy` > `prob_sell` และผ่านเกณฑ์ขั้นต่ำ (เช่น 0.60) ➡️ **BUY**
+*   หาก `prob_sell` > `prob_buy` และผ่านเกณฑ์ขั้นต่ำ ➡️ **SELL**
+*   หากทั้งคู่น้อยกว่าเกณฑ์ หรือคะแนนสูสีกันเกินไป ➡️ **HOLD**
 
-### 5.4 `watch_engine/watcher.py` — The Guard
-- ทำงานเฉพาะตอน Loop หลักกำลัง "นอน"
-- ตรวจสอบราคาและ RSI ทุก 30 วินาที
-- **Trailing Stop**: เลื่อน SL อัตโนมัติเมื่อกำไรวิ่งไปแล้ว
-- **Cooldown**: มีระบบป้องกันไม่ให้ปลุก AI ถี่เกินไป (5 นาที)
+### 4.3 Dynamic Confidence Threshold
+เกณฑ์ขั้นต่ำ (Threshold) ไม่ใช่ค่าตายตัว แต่เปลี่ยนไปตาม **จำนวนไม้ที่เทรดไปแล้วในวันนั้น**:
+*   ไม้แรกของวัน: เกณฑ์อาจจะต่ำ (เช่น 0.55) เพื่อง่ายต่อการหาจุดเข้า
+*   ไม้ที่สอง/สาม: เกณฑ์จะสูงขึ้น (0.65+) ป้องกันการ Overtrading
 
 ---
 
-## 6. Key Design Decisions (อัปเดต)
+## 5. กฎการเทรดและแผนสำรอง (Trading Rules & Contingency Plans)
 
-1. **Dual-Model Predict**: แยก BUY/SELL เป็น 2 โมเดลเพื่อความแม่นยำ
-2. **Hybrid Execution**: ไม่รอรอบเวลาอย่างเดียว แต่ใช้ความไวของ Watcher Engine มาเสริม
-3. **Single Source of Truth**: ย้ายการตั้งค่ากฎการเทรดไปไว้ที่ `risk.py` ที่เดียว
-4. **Adapter Pattern**: ใช้ `_AnalysisServiceAdapter` เชื่อมต่อ Module เก่า (Watcher) เข้ากับ Pipeline ใหม่ (XGBoost)
-5. **Decoupled Logging**: แยกตรรกะการส่ง Log ออกไปเพื่อให้ `main.py` โฟกัสเฉพาะเรื่องกลยุทธ์
+นี่คือจุดเด่นที่สุดของ V2 ที่ทำให้ระบบเป็น "บอทเทรดจริง" ไม่ใช่แค่ "บอทส่งสัญญาณ" 
+
+### 5.1 RiskManager (V5) และ SessionGate
+ระบบถูกแบ่งเวลาออกเป็น Session (อิงจาก `session_gate.py`):
+*   **Morning:** 06:15 - 11:30
+*   **Afternoon:** 13:00 - 17:30
+*   **Evening/Night:** 18:00 - 01:59 (รวมข้ามคืนวันศุกร์)
+
+### 5.2 แผนสำรอง: การบังคับเทรด (Emergency Force BUY/SELL)
+เพื่อรองรับกลยุทธ์ Scalping ที่ต้องการให้เกิดเงินหมุนเวียน (Cash Flow) ระบบมีกลไกรับมือกับสถานการณ์ที่ **โมเดลให้คำตอบเป็น HOLD ต่อเนื่องยาวนานเกินไป**
+
+หากระบบตรวจสอบพบว่าใน Session นี้ **"ยังไม่ได้เทรดสักไม้เลย"** (Quota ยังไม่ครบ) ระบบจะเข้าสู่โหมด **Urgent (ฉุกเฉิน)** เมื่อเวลาใกล้จะหมด:
+
+*   **Force BUY (ใกล้หมดเวลา และยังไม่มีของ):** 
+    *   จุดชนวน: `minutes_to_session_end` <= `FORCE_BUY_THRESHOLD_MIN` (เช่น 25 นาที)
+    *   กลไก: RiskManager จะละทิ้งค่า Confidence ของ XGBoost ทั้งหมด! ไม่ว่าโมเดลจะบอกให้ HOLD หรือ BUY ด้วยความมั่นใจแค่ 0.01 ระบบจะ **บังคับเปลี่ยนผลเป็น BUY** ทันที เพื่อให้มี Position ติดพอร์ตไว้ก่อนหมด Session
+    *   เหตุผล: เพื่อให้มีโอกาสทำกำไรจากความผันผวนเล็กๆ น้อยๆ ดีกว่าเสียโอกาสฟรีๆ 1 Session
+
+*   **Force SELL (ใกล้หมดเวลา และมีของค้างอยู่):**
+    *   จุดชนวน: `minutes_to_session_end` <= `FORCE_SELL_THRESHOLD_MIN` (เช่น 10 นาที)
+    *   กลไก: หากพอร์ตมีทองค้างอยู่ (`holding = True`) และยังไม่ได้ขายออก ระบบจะ **บังคับเปลี่ยนผลเป็น SELL** ทันที แม้ว่าจะขาดทุนอยู่ก็ตาม!
+    *   เหตุผล: กฎเหล็กของ Scalper คือ **"ห้ามห่อของข้าม Session เด็ดขาด"** (No Overnight/Over-session Position) เพราะความเสี่ยงในช่วงตลาดปิดหรือช่วงพักนั้นควบคุมไม่ได้ การตัดขาดทุนแบบ Force Sell ช่วยเคลียร์สมองและพอร์ตให้ว่างสำหรับ Session ถัดไป
+
+### 5.3 ตัวกรองสเปรด (Spread Filter)
+ในสภาวะปกติ (ไม่ฉุกเฉิน) หากมีสัญญาณ SELL ระบบจะคำนวณ **ค่าเสียโอกาสจาก Spread**:
+*   `spread_cost_thb` = น้ำหนักทอง * `SPREAD_PER_BAHT_WEIGHT` (เช่น 200 บาท)
+*   หาก `unrealized_pnl` (กำไรขณะนั้น) ติดลบมากกว่า `spread_cost_thb + ACCEPTABLE_LOSS` ระบบจะปฏิเสธการขาย (Reject) และบังคับ **HOLD** เพื่อรอให้ราคากลับมาคุ้มทุนก่อน 
+*   *ยกเว้น* เป็นการขายแบบ Force SELL ตอนหมดเวลา หรือชน Stop Loss จริงๆ
 
 ---
 
-## 7. ความแตกต่างจาก Src (v1)
+## 6. ระบบฐานข้อมูลและความถูกต้อง (Database & Data Integrity)
 
-| หัวข้อ | Src (v1) | Src_V2 (v2.1) |
-|--------|----------|---------------|
-| **Engine** | LLM-based | Pure ML (XGBoost) |
-| **Logic Flow** | รอรอบเวลา | Hybrid (Scheduled + Event-driven) |
-| **Configuration** | กระจัดกระจาย | Centralized ใน risk.py |
-| **Execution** | Sequential | Concurrent Gates + Threaded Watcher |
-| **Log Prep** | เขียนใน main | แยกเป็น Module อิสระ |
+V2 พลิกโฉมการจัดการข้อมูลด้วย PostgreSQL โดยแบ่งออกเป็นหลายตารางที่มีหน้าที่ชัดเจน:
+
+### 6.1 `session_quota` (The Session Tracker)
+ตารางนี้คือตัวตัดสินว่า "วันนี้นายเทรดครบหรือยัง?"
+*   เก็บค่า `rounds_done` (รอบที่ซื้อ-ขายจบแล้ว)
+*   ทุกครั้งที่เกิด BUY: สั่งอัปเดต `mark_session_buy()` (จดเวลาเริ่มไม้)
+*   ทุกครั้งที่เกิด SELL: สั่งอัปเดต `mark_session_sell()` (ปรับ `is_complete = TRUE` และบวก `rounds_done`)
+*   การเชื่อมข้อมูลนี้ทำให้บอทสามารถปิดโปรแกรม รีสตาร์ท หรือไฟดับได้ โดยที่พอกลับมาเปิดใหม่ บอทจะรู้ทันทีว่า "ค้างไม้ซื้อไว้อยู่นะ ยังขายไม่จบ"
+
+### 6.2 `portfolio` และ `trade_log`
+การอัปเดตยอดพอร์ต (Portfolio) และประวัติการเทรด (Trade Log) มีการเชื่อมโยงที่แน่นหนามาก โดยเฉพาะเวลา **ขาย (SELL)** ซึ่งเป็นจุดชี้วัด PnL (กำไร/ขาดทุน)
+
+#### 🛡️ ความปลอดภัยขั้นสูง: Atomic Transaction (`record_emergency_sell_atomic`)
+ใน V1 การบันทึกลง 2 ตารางอาจเกิดจังหวะเหลื่อมล้ำที่ทำให้ข้อมูลพัง (เช่น บันทึก Trade Log สำเร็จ แต่ตอนอัปเดตยอดทองในพอร์ตกลับ Error ทำให้มีทองในระบบค้างอยู่ ทั้งที่ขายไปแล้ว)
+
+ใน V2 การขาย (SELL) จะใช้ตรรกะ **Atomic Transaction** เสมอ:
+1. ระบบเปิด Transaction
+2. `INSERT INTO trade_log` (บันทึกราคา, จำนวนกรัม, คำนวณกำไร/ขาดทุน)
+3. `UPDATE portfolio` (ลดยอด `gold_grams`, เพิ่ม `cash_balance`, รีเซ็ต `cost_basis`)
+4. **COMMIT:** หากทำงานผ่านทั้งคู่ ข้อมูลจะถูกเซฟพร้อมกัน
+5. **ROLLBACK:** หากเกิด Error ข้อมูลทั้งหมดใน Transaction จะถูกยกเลิก! พอร์ตจะยังคงมีทองอยู่เหมือนเดิม ป้องกันหายนะข้อมูลพัง 100%
+
+---
+
+## 7. ระบบเฝ้าระวังระหว่าง Sleep (Watcher Engine)
+
+วงรอบ 15 นาทีอาจจะ "ช้าเกินไป" สำหรับตลาดทองคำที่ผันผวน V2 จึงมี **Watcher Engine** ทำงานเป็น Background Thread
+
+### กลไกการทำงานของ Watcher:
+1.  **ตื่นทุก 30 วินาที:** ระหว่างที่ `main.py` กำลัง Sleep รอให้ครบ 15 นาที ตัว Watcher จะดึงราคาสดจาก API ตลอดเวลา
+2.  **ตรวจสอบ Trailing Stop:** ถ้าราคาพุ่งขึ้น Watcher จะคอยขยับเส้น Stop Loss ตามก้นขึ้นไปเรื่อยๆ (Trailing) หากราคาวกกลับมาชนเส้นนี้ Watcher จะ **ส่งสัญญาณบังคับขาย (Emergency Sell)** ทันทีโดยไม่ต้องรอให้ AI ตัดสินใจ
+3.  **ตรวจสอบ RSI Extreme:** ถ้าราคาตกแรงผิดปกติจน RSI ทะลุ Oversold Limit (เช่น < 30) Watcher จะปลุกให้ AI ตื่นขึ้นมาวิเคราะห์ตลาดทันที (Out-of-cycle Analysis) เพราะอาจเป็นโอกาสทองในการช้อนซื้อ (Buy the Dip)
+
+---
+
+## 8. สคริปต์สั่งการด้วยมือ (Manual Emergency Scripts)
+
+แม้ระบบจะเป็น Auto 100% แต่ V2 มีสคริปต์ภายนอกสำหรับ Admin ในกรณีตลาดพังทลาย หรือต้องการแทรกแซงระบบทันที:
+
+*   **`emergency_buy.py`:** สั่งให้ระบบสร้าง Log การซื้อและอัปเดตพอร์ต **โดยข้าม AI ทั้งหมด** (ใช้เมื่อ Admin มองเห็นโอกาสและกดซื้อเองในแอป แล้วต้องการเอาข้อมูลมาซิงก์กับระบบ)
+*   **`emergency_sell.py`:** สั่งเทขายทองในพอร์ตทิ้งทั้งหมด (Liquidate) ทันที พร้อมทำ Atomic Transaction เพื่อล้างพอร์ต ใช้ในกรณีฉุกเฉินระดับสีแดง
+*   **`emergency_force.py`:** ตัวช่วยบังคับแก้ค่าต่างๆ ใน Database ตรงๆ หาก State ของระบบคลาดเคลื่อนรุนแรง
+
+---
+
+## 9. สรุปเปรียบเทียบ: ทำไม V2 ถึงเป็น "The True Scalper"
+
+| คุณสมบัติ (Feature) | Src (v1) | Src_V2 (v2.1) | เหตุผลในการพัฒนา |
+| :--- | :--- | :--- | :--- |
+| **สมองหลัก (Brain)** | Prompting LLM (ReAct) | XGBoost Dual-Model | เร็วกว่า 100 เท่า, ตัดสินใจคงที่ ไม่เดาสุ่มคำตอบ |
+| **ความมั่นใจ (Confidence)** | ประเมินโดย AI (ดิ้นได้) | คำนวณจาก Probability (ตายตัว) | ควบคุม Risk Reward Ratio ได้แม่นยำทางคณิตศาสตร์ |
+| **จัดการโควต้าเทรด** | นับตัวเลขลอยๆ ใน Portfolio | ตาราง `session_quota` ใน DB | แม่นยำ ทนทานต่อการไฟดับ/รีบูตระบบ |
+| **การแก้ปัญหาถือของนาน** | ต้องรอ AI ยอมสั่งขาย | มี Force SELL อัตโนมัติตามเวลา | บังคับปิดออเดอร์ก่อนหมดเวลา ล้างพอร์ตให้สะอาดเสมอ |
+| **การแก้ปัญหาไม่ยอมเข้าเทรด** | ถือเงินสดข้ามวันไปเรื่อยๆ | มี Force BUY อัตโนมัติตามเวลา | บังคับให้ระบบสร้างกระแสเงินสด เพื่อเก็บกำไรระยะสั้น |
+| **ความปลอดภัยของฐานข้อมูล** | บันทึกทีละบรรทัด (เสี่ยงพัง) | Atomic Transaction (Rollback ได้) | หมดปัญหา PnL ผิดพลาด หรือ ทองหาย/เงินหายในระบบ |
+| **การติดตามราคาระหว่างรอ** | หลับลึก 15 นาที (Blind Spot) | Watcher ตรวจจับทุก 30 วินาที | ป้องกันการโดนลากจนล้างพอร์ต หรือพลาดจังหวะช้อนซื้อ |
+
+---
+
+## 10. สรุปลำดับเหตุการณ์ (Chronological Flow of a Cycle)
+
+เพื่อความเข้าใจที่ชัดเจนที่สุด นี่คือลำดับสิ่งที่บอท 1 ตัวทำใน 1 วงรอบการทำงาน:
+
+1.  **[Init]** ดึงข้อมูลพอร์ตปัจจุบันจาก Database (มีของไหม? มีเงินเท่าไหร่?)
+2.  **[Fetch]** ดึงข้อมูล OHLCV, HSH ราคาไทย, และค่าเงิน USD/THB
+3.  **[Extract]** คำนวณ RSI, MACD, ATR ฯลฯ แปลงเป็น 26 Feature Vectors
+4.  **[Predict]** โยนให้ `model_buy.pkl` และ `model_sell.pkl` ให้คะแนนความน่าจะเป็น
+5.  **[Gate 1: Session]** เช็คว่าอยู่ในเวลาเทรดไหม? โควต้าไม้เทรดเต็มหรือยัง? ใกล้หมดเวลาหรือยัง? (ถ้าใกล้หมดเวลา อาจเกิดการแทรกแซง Trigger Force BUY/SELL)
+6.  **[Gate 2: Risk]** เช็คกำไรขั้นต่ำ (Spread) เช็คว่าพอร์ตมีเงินพอซื้อไหม เช็คว่าติดดอยอยู่ห้ามซื้อซ้ำ (ยกเว้น Martingale)
+7.  **[Decision]** รวบรวมข้อมูลทั้งหมด สรุปเป็นคำสั่งสุดท้าย: `BUY`, `SELL`, หรือ `HOLD`
+8.  **[Persist]** บันทึกการตัดสินใจทั้งหมดลง DB ตาราง `runs` (ใช้ตรวจสอบย้อนหลัง)
+9.  **[Action]** หากเป็น BUY/SELL และ Notify=True ให้เรียก `mark_session_buy` หรือ `sell` และอัปเดตเส้น Stop Loss ในพอร์ต
+10. **[Log]** ส่งสัญญาณเข้าระบบกลาง (Team API) เพื่อให้ผู้ใช้งานนำไปกดในแอปจริง
+11. **[Sleep & Watch]** พักผ่อน 15 นาที โดยปล่อยให้ Watcher Engine เฝ้าเวรยามแทน
+
+*(จบเอกสาร)*

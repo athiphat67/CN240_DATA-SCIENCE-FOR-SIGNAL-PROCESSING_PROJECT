@@ -429,6 +429,7 @@ DEFAULT_PORTFOLIO = {
     "current_value_thb": 0.0,
     "unrealized_pnl": 0.0,
     "trades_today": 0,
+    "trades_this_session": 0,
 }
 
 # ─────────────────────────────────────────────

@@ -203,15 +203,38 @@ class WatcherEngine:
                     interval=self.config.interval,
                 )
 
-                # 2. อ่านราคา
-                current_price_per_gram = self._extract_price(market_state)
-                if current_price_per_gram is None:
+                data_quality = market_state.get("data_quality", {})
+                if (
+                    data_quality.get("source") != "MTS_API"
+                    or data_quality.get("fallback")
+                    or data_quality.get("stale")
+                    or data_quality.get("status") != "ok"
+                ):
+                    self.log(
+                        "⚠️ MTS data not tradable — "
+                        f"status={data_quality.get('status')} "
+                        f"stale={data_quality.get('stale')} "
+                        f"fallback={data_quality.get('fallback')}",
+                        "ERROR",
+                    )
+                    time.sleep(3)
+                    continue
+
+                # 2. อ่านราคา: entry=ask/sell, exit=bid/buy, movement=mid
+                entry_price_per_gram = self._extract_price(market_state, "entry")
+                exit_price_per_gram = self._extract_price(market_state, "exit")
+                movement_price_per_gram = self._extract_price(market_state, "movement")
+                if (
+                    entry_price_per_gram is None
+                    or exit_price_per_gram is None
+                    or movement_price_per_gram is None
+                ):
                     self.log("⚠️ Cannot read gold price — skipping cycle", "ERROR")
                     time.sleep(3)
                     continue
 
                 # 3. [P0] Trailing Stop ต้องรันก่อน evaluate เสมอ
-                self._manage_trailing_stop(current_price_per_gram)
+                self._manage_trailing_stop(exit_price_per_gram)
 
                 # 4. ตรวจสอบข้อมูลพื้นฐาน
                 ti = market_state.get("technical_indicators", {})
@@ -297,7 +320,7 @@ class WatcherEngine:
                 # 7. ตัดสินใจตาม strategy
                 should_trigger, trigger_reason = self._evaluate_strategy(
                     holding_gold=holding_gold,
-                    current_price=current_price_per_gram,
+                    current_price=exit_price_per_gram if holding_gold else entry_price_per_gram,
                     cost_basis=cost_basis,
                     rsi=rsi,
                     market_state=market_state,
@@ -312,12 +335,12 @@ class WatcherEngine:
 
                 if should_trigger:
                     ready, block_reason = self.trigger_state.is_ready(
-                        current_price_per_gram,
+                        movement_price_per_gram,
                         bypass_cooldown=is_sl_trigger,
                     )
                     if ready:
                         self.log(f"🔥 Trigger AI: {trigger_reason}")
-                        self.trigger_state.update_trigger(current_price_per_gram)
+                        self.trigger_state.update_trigger(movement_price_per_gram)
                         self._trigger_analysis()
                     else:
                         self.log(f"🔒 Blocked — {block_reason}")
@@ -688,17 +711,26 @@ class WatcherEngine:
 
     # ── Price Extraction ──────────────────────────────────────────────────────
 
-    def _extract_price(self, market_state: dict) -> Optional[float]:
-        """อ่านราคาทองจาก MTS แบบ defensive — คืน None ถ้าข้อมูลไม่ครบหรือผิดพลาด"""
+    def _extract_price(self, market_state: dict, price_role: str = "movement") -> Optional[float]:
+        """Read MTS quote by role and return THB/gram. entry=ask, exit=bid, movement=mid."""
         try:
             thai_gold_data = market_state.get("market_data", {}).get(
                 "thai_gold_thb", {}
             )
-            raw_price = thai_gold_data.get("sell_price_thb")
+            price_key_by_role = {
+                "entry": "sell_price_thb",
+                "buy": "sell_price_thb",
+                "exit": "buy_price_thb",
+                "sell": "buy_price_thb",
+                "movement": "mid_price_thb",
+                "mid": "mid_price_thb",
+            }
+            price_key = price_key_by_role.get(price_role, "mid_price_thb")
+            raw_price = thai_gold_data.get(price_key)
 
             # ตรวจสอบว่าดึงราคามาได้หรือไม่
             if raw_price is None:
-                self.log("⚠️ Could not find 'sell_price_thb' in market_state", "WARNING")
+                self.log(f"⚠️ Could not find '{price_key}' in market_state", "WARNING")
                 return None
 
             # แปลงเป็น float (เผื่อได้มาเป็น string จาก API)
