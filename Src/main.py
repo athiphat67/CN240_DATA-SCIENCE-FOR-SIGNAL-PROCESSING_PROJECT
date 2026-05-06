@@ -364,7 +364,7 @@ def main():
                  "provider":  args.provider,
                  "period":    args.period,
                  "interval":  '5m',
-                 "loop_sleep_seconds": 180,
+                 "loop_sleep_seconds": 30,
              },
          )
          _watcher.start()
@@ -382,7 +382,7 @@ def main():
 
             # ── 6. Print result ────────────────────────────────────────
             print_result(result)
-            # send_trade_log_from_result(result, emit_logs=True)
+            send_trade_log_from_result(result, emit_logs=True)
 
             # ── 7. Save JSON output ────────────────────────────────────
             # if args.output and result["status"] == "success":
