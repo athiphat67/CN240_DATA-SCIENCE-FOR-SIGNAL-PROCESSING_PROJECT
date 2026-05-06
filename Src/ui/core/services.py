@@ -977,10 +977,10 @@ class AnalysisService:
                 # fast path: ไม่ใช้ tool loop → readiness check ไม่มีผล
                 react_config = ReactConfig(max_iterations=1, max_tool_calls=0)
             else:
-                # [P1] inject ReadinessConfig — required_indicators เปลี่ยนได้โดยไม่แตะ checker
+                # [v3.5] ปิดการใช้ ReAct loop — ใช้ Single-Shot Analysis เพื่อความรวดเร็ว
                 react_config = ReactConfig(
-                    max_iterations=3,
-                    max_tool_calls=5,
+                    max_iterations=1,
+                    max_tool_calls=0,
                     readiness=ReadinessConfig(
                         required_indicators=["rsi", "macd", "trend", "force_react_loop"],
                         require_htf=True,
