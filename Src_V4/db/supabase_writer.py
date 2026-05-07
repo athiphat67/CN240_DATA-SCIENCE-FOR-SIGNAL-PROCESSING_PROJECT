@@ -25,10 +25,18 @@ def _safe_upsert(table: str, data: dict, conflict_col: str = "id") -> bool:
 
     for attempt in range(3):
         try:
-            get_supabase_client().table(table).upsert(data, on_conflict=conflict_col).execute()
+            res = get_supabase_client().table(table).upsert(data, on_conflict=conflict_col).execute()
+            
+            # ตรวจสอบ Error ที่อาจแฝงมาใน Response Object
+            if hasattr(res, 'error') and res.error is not None:
+                raise Exception(f"Supabase API Error: {res.error}")
+            
+            # เพิ่ม Success Log เพื่อให้รู้ว่าโค้ดวิ่งมาถึงและยิงลง DB จริงๆ
+            logger.info(f"[DB] ✅ UPSERT {table} Success: {data.get('id', data.get('bar_time'))}")
             return True
+            
         except Exception as e:
-            logger.warning(f"[DB] {table} upsert attempt {attempt+1} failed: {e}")
+            logger.warning(f"[DB] ⚠️ {table} upsert attempt {attempt+1} failed: {e}")
             if attempt == 2:
                 _write_fallback(table, data, str(e))
                 return False
