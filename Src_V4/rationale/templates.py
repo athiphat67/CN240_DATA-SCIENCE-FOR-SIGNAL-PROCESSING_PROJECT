@@ -14,11 +14,14 @@ bullish_drivers = {
     'F_Syn_Price': "price trading heavily below the theoretical synthetic fair value",
     'F_XAU_Mom_Mid': "strong mid-term momentum aligning with the bullish trajectory",
     'F_BB_Pos': "price bouncing off the lower Bollinger Band indicating oversold conditions",
-    'F_SA_TWAP_Dev': "price trading significantly below the session TWAP (mean reversion signal)"
+    'F_SA_TWAP_Dev': "price trading significantly below the session TWAP (mean reversion signal)",
+    # ── v11 dominant features ──────────────────────────────────────────────────
+    'F_FSP': "FSP forward price structure showing a bullish carry advantage over spot",
+    'F_SA_Range': "wide session range signaling explosive intraday movement potential",
 }
 
 # ==========================================
-# 🟡 HOLDING DRIVERS (ใช้เมื่อสั่ง HOLD - สไตล์ "Patient & Sustained")
+# 🟡 HOLDING DRIVERS (ใช้เมื่อสั่ง HOLD และ ranker_score > 0 — "Patient & Sustained")
 # ==========================================
 holding_drivers = {
     'F_Thai_Premium': "Thai gold premium remains structurally supportive of our current position",
@@ -31,7 +34,10 @@ holding_drivers = {
     'F_Syn_Price': "price action stays well-aligned with the synthetic fair value thesis",
     'F_XAU_Mom_Mid': "steady mid-term momentum confirms the broader trend is still intact",
     'F_BB_Pos': "price maintaining a healthy position within the Bollinger Bands without extreme deviation",
-    'F_SA_TWAP_Dev': "price holding steadily above session TWAP, confirming intraday strength"
+    'F_SA_TWAP_Dev': "price holding steadily above session TWAP, confirming intraday strength",
+    # ── v11 dominant features ──────────────────────────────────────────────────
+    'F_FSP': "FSP alignment continues to support the structural case for holding the position",
+    'F_SA_Range': "healthy session range providing adequate volatility for position continuation",
 }
 
 # ==========================================
@@ -48,5 +54,29 @@ bearish_drivers = {
     'F_Syn_Price': "price trading above synthetic fair value, structurally overvalued",
     'F_XAU_Mom_Mid': "loss of mid-term momentum, signaling a lack of buying pressure",
     'F_BB_Pos': "price trading above the upper Bollinger Band, at risk of a mean-reversion pullback",
-    'F_SA_TWAP_Dev': "price trading significantly above the session TWAP (exhaustion signal)"
+    'F_SA_TWAP_Dev': "price trading significantly above the session TWAP (exhaustion signal)",
+    # ── v11 dominant features ──────────────────────────────────────────────────
+    'F_FSP': "FSP forward structure deteriorating, signaling an adverse carry cost headwind",
+    'F_SA_Range': "session range compression exhausting volatility and increasing reversal risk",
+}
+
+# ==========================================
+# ⚪ CAUTIOUS DRIVERS (ใช้เมื่อสั่ง HOLD และ ranker_score < 0 — "No Entry / Below Threshold")
+# ใช้ negative SHAP features เพื่อ narrate เหตุผลที่ block entry
+# ==========================================
+cautious_drivers = {
+    'F_Thai_Premium': "Thai gold premium is unfavorably priced, eroding the statistical edge",
+    'F_Regime': "regime signal is insufficiently bullish to warrant entering the market",
+    'F_Corr_XAU_USD': "XAU/USD macro correlation is misaligned, undermining the directional thesis",
+    'F_RSI_14': "RSI configuration does not support a high-conviction entry at current levels",
+    'F_SRVR': "remaining session volatility is too low to achieve an adequate reward-to-risk ratio",
+    'F_Spread_vs_ATR': "transaction cost relative to volatility makes this entry uneconomical",
+    'F_XAU_Mom_Short': "short-term momentum is negative, blocking the long entry signal",
+    'F_Syn_Price': "price is above synthetic fair value — no statistical discount available",
+    'F_XAU_Mom_Mid': "mid-term momentum is insufficient to support a high-confidence long",
+    'F_BB_Pos': "Bollinger Band position indicates overbought conditions, blocking entry",
+    'F_SA_TWAP_Dev': "price trading above session TWAP removes the mean-reversion setup",
+    # ── v11 dominant features ──────────────────────────────────────────────────
+    'F_FSP': "FSP signal is net negative — forward carry structure does not support entry",
+    'F_SA_Range': "compressed session range limits the reward potential below the minimum threshold",
 }

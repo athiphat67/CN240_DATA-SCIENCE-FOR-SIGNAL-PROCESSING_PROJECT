@@ -21,10 +21,5 @@ if __name__ == "__main__":
         send_discord(f"🚀 HSH Trader v3.0 started | State: `{state}` | DRY_RUN: `{DRY_RUN}`")
     except Exception as e:
         log.warning(f"Startup state check failed: {e}")
-        
-        
-    from scheduler.orchestrator import run_signal_pipeline
-    log.info("🔥 Running initial pipeline test...")
-    run_signal_pipeline()  # รันทันที 1 รอบเพื่อตรวจสอบ
-
+        gi
     start_scheduler()
