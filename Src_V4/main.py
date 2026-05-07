@@ -21,5 +21,4 @@ if __name__ == "__main__":
         send_discord(f"🚀 HSH Trader v3.0 started | State: `{state}` | DRY_RUN: `{DRY_RUN}`")
     except Exception as e:
         log.warning(f"Startup state check failed: {e}")
-        gi
     start_scheduler()
