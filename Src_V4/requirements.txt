@@ -70,3 +70,4 @@ websockets==16.0
 xgboost==2.0.3
 yarl==1.23.0
 zstandard==0.25.0
+gradio
