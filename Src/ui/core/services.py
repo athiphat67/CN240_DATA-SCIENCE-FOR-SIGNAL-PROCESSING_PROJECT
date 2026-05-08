@@ -228,6 +228,7 @@ class AnalysisService:
         persistence=None,
         discord_notifier: DiscordNotifier = None,
         telegram_notifier: TelegramNotifier = None,
+        xgb_fetcher=None,
     ):
         self.skill_registry    = skill_registry
         self.role_registry     = role_registry
@@ -235,8 +236,10 @@ class AnalysisService:
         self.persistence       = persistence
         self.discord_notifier  = discord_notifier
         self.telegram_notifier = telegram_notifier
+        self.xgb_fetcher       = xgb_fetcher
         self.max_retries       = SERVICE_CONFIG["max_retries"]
         sys_logger.info(f"AnalysisService initialized (max_retries={self.max_retries})")
+        sys_logger.info(f"XGBoost fetcher: {'enabled' if xgb_fetcher else 'disabled'}")
         self.risk_manager = RiskManager()
         sys_logger.info("RiskManager initialized as singleton")
 
@@ -394,6 +397,20 @@ class AnalysisService:
                     )
 
                 sys_logger.info("Market data fetched successfully")
+
+                # ── XGBoost Dual-Model Signal ──────────────────────────────
+                # เรียก BUY/SELL Model แล้ว inject สัญญาณเข้า market_state
+                # ให้ LLM Agent เห็นเป็น context เพิ่มเติมในการตัดสินใจ
+                if self.xgb_fetcher:
+                    try:
+                        xgb_signal = self.xgb_fetcher(market_state)
+                        market_state["xgboost_signal"] = xgb_signal
+                        sys_logger.info(f"[XGBoost] Signal injected into market_state: {xgb_signal}")
+                    except Exception as _xgb_err:
+                        sys_logger.warning(f"[XGBoost] Failed, using HOLD: {_xgb_err}")
+                        market_state["xgboost_signal"] = "HOLD"
+                else:
+                    market_state["xgboost_signal"] = None
                 
                 sys_logger.info("Starting Async Pre-fetch for Tools...")
                 # ถ้าไฟล์นี้รันอยู่ใน async function อยู่แล้ว ใช้ await ได้เลย
@@ -1557,7 +1574,7 @@ class HistoryService:
 # ─────────────────────────────────────────────
 
 
-def init_services(skill_registry, role_registry, data_orchestrator, db):
+def init_services(skill_registry, role_registry, data_orchestrator, db, xgb_fetcher=None):
     """Initialize all services with dependency injection"""
  
     # สร้าง notifier instances
@@ -1583,6 +1600,7 @@ def init_services(skill_registry, role_registry, data_orchestrator, db):
         persistence       = db,
         discord_notifier  = discord_notifier,    # ← INJECT DISCORD
         telegram_notifier = telegram_notifier,   # ← INJECT TELEGRAM
+        xgb_fetcher       = xgb_fetcher,         # ← INJECT XGBOOST
     )
     portfolio_service = PortfolioService(db)
     history_service   = HistoryService(db)

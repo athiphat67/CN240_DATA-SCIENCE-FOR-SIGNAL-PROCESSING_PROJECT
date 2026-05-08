@@ -62,3 +62,8 @@ DISCORD_MENTION_ID  = os.getenv("DISCORD_MENTION_ID", "")
 # ─── Send trade log ───────────────────────────────────────────────────────────
 TRADE_LOG_API_URL = os.getenv("TRADE_LOG_API_URL", "")
 TRADE_LOG_API_KEY = os.getenv("TRADE_LOG_API_KEY", "")
+
+# ─── Dynamic TP Manager ──────────────────────────────────────────
+TP_ATR_MULTIPLIER       = 1.5   # Trail distance
+TP_BREAKEVEN_ATR_MULT   = 1.0   # Lock trail after this profit
+TP_SCORE_DROP_THRESH    = 0.15  # Early warning threshold
