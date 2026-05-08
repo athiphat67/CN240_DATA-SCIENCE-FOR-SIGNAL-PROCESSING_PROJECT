@@ -16,6 +16,9 @@ from db.supabase_writer import insert_signal, insert_bar_log, update_state
 from notifier.discord_notifier import notify_buy_signal, notify_sell_signal, notify_heartbeat, notify_error
 from rationale.generator import build_trade_payload
 from notifier.trade_log_api import send_trade_log
+from config.settings import TP_ATR_MULTIPLIER, TP_BREAKEVEN_ATR_MULT, TP_SCORE_DROP_THRESH
+from core.dynamic_tp_manager import DynamicTPManager
+from notifier.discord_notifier import notify_dynamic_tp
 
 # ─── Logging & Timezone ──────────────────────────────────────────────────────
 TZ = pytz.timezone(TIMEZONE)
@@ -26,6 +29,12 @@ trading_log = logging.getLogger("trading")
 _last_bar_time : str   = "N/A"
 _last_score    : float = 0.0
 _last_state    : str   = STATE_EMPTY
+
+tp_manager = DynamicTPManager(
+    atr_multiplier=TP_ATR_MULTIPLIER,
+    breakeven_atr_mult=TP_BREAKEVEN_ATR_MULT,
+    score_drop_threshold=TP_SCORE_DROP_THRESH
+)
 
 
 def run_signal_pipeline() -> None:
@@ -57,6 +66,33 @@ def run_signal_pipeline() -> None:
         # ─── P4: Signal Gate & State Check ────────────────────────────────────
         gate_result = evaluate_signal_gate(inference_result, features_row)
         _last_state  = gate_result["state_before"]
+
+        # ─── Dynamic TP Manager: Handle Activation/Reset ─────────────────────
+        if gate_result["passed"]:
+            if gate_result["signal_type"] == "BUY":
+                tp_manager.activate(
+                    entry_ask=gate_result["hsh_ask"],
+                    entry_score=gate_result["ranker_score"],
+                    initial_bid=gate_result["hsh_bid"]
+                )
+        elif gate_result["signal_type"] == "SELL":
+            tp_manager.reset()
+
+        # ─── Dynamic TP Manager: Evaluate every M10 bar ──────────────────────
+        tp_trigger, tp_price, trail_level = tp_manager.update(
+            current_bid=features_row["hsh_close_bid"],
+            atr_48=features_row["F_ATR_48"],
+            current_score=inference_result["ranker_score"]
+        )
+
+        if tp_trigger != "NONE":
+            notify_dynamic_tp(
+                trigger=tp_trigger,
+                price=tp_price,
+                trail=trail_level,
+                score=inference_result["ranker_score"],
+                atr=features_row["F_ATR_48"]
+            )
 
         # ─── Rationale Generation (SHAP → Human-Readable Reason) ──────────────
         rationale_payload = build_trade_payload(

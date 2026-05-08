@@ -83,3 +83,17 @@ def notify_heartbeat(state: str, last_bar: str, score: float) -> None:
 def notify_error(context: str, error: str) -> None:
     msg = f"⚠️ **ERROR** [{context}]\n```{str(error)[:1500]}```"
     send_discord(msg)
+
+# 🆕 ─── Dynamic TP Notifications ──────────────────────────────────────────────
+def notify_dynamic_tp(trigger: str, price: float, trail: float, score: float, atr: float) -> None:
+    """ส่งแจ้งเตือน Dynamic TP / Trailing Stop ตาม trigger type"""
+    mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
+    
+    messages = {
+        "TP_UPDATED": f"📈 TP Adjusted → `{price:,.2f}` THB\nTrail Level: `{trail:,.2f}`",
+        "BREAKEVEN_LOCK": f"🔒 Breakeven Locked\nTrail fixed at `{trail:,.2f}`. Downside risk removed.",
+        "TRAIL_HIT": f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\nPrice hit trail at `{trail:,.2f}`. Consider closing now.\nCurrent Score: `{score:.4f}`",
+        "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out."
+    }
+    
+    send_discord(f"🤖 **HSH Dynamic TP**\n{messages[trigger]}\nATR(48): `{atr:,.2f}`")
