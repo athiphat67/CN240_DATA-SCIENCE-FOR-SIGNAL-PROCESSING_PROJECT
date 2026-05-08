@@ -9,9 +9,9 @@ LOG_LEVEL   = os.getenv("LOG_LEVEL", "INFO")
 TIMEZONE    = os.getenv("TIMEZONE", "Asia/Bangkok")
 
 # ─── Model ────────────────────────────────────────────────────────────────────
-MODEL_PATH      = "models/lambdamart_v11.json"
-MODEL_META_PATH = "models/lambdamart_v11_meta.json"
-SIGNAL_THRESHOLD    = 0.65          # ranker score ≥ this → BUY
+MODEL_PATH          = "models/lambdamart_v11.json"
+MODEL_META_PATH     = "models/lambdamart_v11_meta.json"
+SIGNAL_THRESHOLD    = 0.07          # ranker score ≥ this → trigger BUY/SELL check
 TIMEFRAME_MIN       = 10            # M10
 LOOKBACK_BARS       = 2200          # bars to load (≥ OLS_WINDOW 2016)
 
@@ -23,31 +23,20 @@ PURITY_GLOBAL_GOLD  = 0.995
 CONV_FACTOR         = (WEIGHT_TH_BAHT / WEIGHT_TROY_OUNCE) * (PURITY_TH_GOLD / PURITY_GLOBAL_GOLD)
 # ≈ 0.4744
 
-GOLD_WEIGHT_DECIMALS = 5            # truncate (ไม่ใช่ round) ทศนิยม 5 ตำแหน่ง
-
-# ─── Trade Sizing ─────────────────────────────────────────────────────────────
-INVESTMENT_AMOUNT_THB = 1_000.0
-MAX_CONCURRENT_TRADES = 1
-
-# ─── TP/SL ────────────────────────────────────────────────────────────────────
-TP_ATR_MULTIPLIER   = 1.5
-SL_ATR_MULTIPLIER   = 1.0
-MIN_TP_DISTANCE_THB = 50.0
-MAX_SL_DISTANCE_THB = 200.0
+# ─── State ────────────────────────────────────────────────────────────────────
+STATE_EMPTY   = "EMPTY"             # ไม่มีทองในมือ → อนุญาตเฉพาะ BUY
+STATE_HOLDING = "HOLDING"           # มีทองในมืออยู่ → อนุญาตเฉพาะ SELL
 
 # ─── Session Definitions (M10 bars) ───────────────────────────────────────────
-# Morning:   09:00–10:30 → 9 bars × 10min  = 90 min
-# Afternoon: 13:00–15:20 → 14 bars × 10min = 140 min
-# Night:     18:00–22:00 → 24 bars × 10min = 240 min
 SESSION_HOURS = {
-    "Morning"   : (9*60,   9*60 + 90),    # 540–630 นาทีนับจากเที่ยงคืน
-    "Afternoon" : (13*60,  13*60 + 140),  # 780–920
-    "Night"     : (18*60,  18*60 + 240),  # 1080–1320
+    "Morning"   : (6*60,  12*60),   # 06:00 - 11:59 → 360-720 นาที
+    "Afternoon" : (12*60, 18*60),   # 12:00 - 17:59 → 720-1080 นาที
+    "Night"     : (18*60, 2*60),    # 18:00 - 01:59 → 1080-120 นาที [ข้ามเที่ยงคืน]
 }
 SESSION_EXPECTED_BARS = {
-    "Morning"   : 9,
-    "Afternoon" : 14,
-    "Night"     : 24,
+    "Morning"   : 36,  # 6 ชม. × 6 แท่ง/ชม.
+    "Afternoon" : 36,  # 6 ชม. × 6 แท่ง/ชม.
+    "Night"     : 48,  # 8 ชม. × 6 แท่ง/ชม.
 }
 
 # ─── Feature Windows (M10) ────────────────────────────────────────────────────
@@ -57,6 +46,11 @@ CORR_WINDOW         = 18
 VOL_WINDOW          = 144
 SPREAD_NORM_WINDOW  = 144
 
+# ─── Signal Gate Thresholds ───────────────────────────────────────────────────
+GATE_SRVR_MIN           = 0.15
+GATE_SPREAD_NORM_MAX    = 2.5
+GATE_REGIME_REQUIRED    = 1
+
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -64,3 +58,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 # ─── Discord ──────────────────────────────────────────────────────────────────
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DISCORD_MENTION_ID  = os.getenv("DISCORD_MENTION_ID", "")
+
+# ─── Send trade log ───────────────────────────────────────────────────────────
+TRADE_LOG_API_URL = os.getenv("TRADE_LOG_API_URL", "")
+TRADE_LOG_API_KEY = os.getenv("TRADE_LOG_API_KEY", "")
