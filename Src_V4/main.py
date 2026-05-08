@@ -12,20 +12,12 @@ setup_logging()
 log = logging.getLogger("system")
 
 def recover_tp_state() -> None:
-    """Sync TP manager if bot restarts while user is still HOLDING"""
     if DRY_RUN or get_current_state() != "HOLDING":
         return
-    
     try:
         client = get_supabase_client()
-        res = client.table("signals")\
-            .select("hsh_ask_price, hsh_bid_price, ranker_score")\
-            .eq("signal_type", "BUY")\
-            .eq("passed", True)\
-            .order("created_at", desc=True)\
-            .limit(1)\
-            .execute()
-            
+        res = client.table("signals").select("hsh_ask_price, hsh_bid_price, ranker_score")\
+            .eq("signal_type", "BUY").eq("passed", True).order("created_at", desc=True).limit(1).execute()
         if res.data and not tp_manager.is_active:
             last_buy = res.data[0]
             tp_manager.activate(
