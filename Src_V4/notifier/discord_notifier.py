@@ -80,17 +80,9 @@ def notify_dynamic_tp(trigger: str, price: float, trail: float, score: float, at
         "TP_UPDATED": f"📈 TP Adjusted → `{price:,.2f}` THB\nTrail Level: `{trail:,.2f}`",
         "BREAKEVEN_LOCK": f"🔒 Breakeven Locked\nTrail fixed at `{trail:,.2f}`. Downside risk removed.",
         "TRAIL_HIT": f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\nPrice hit trail at `{trail:,.2f}`. Consider closing now.\nCurrent Score: `{score:.4f}`",
-        "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out."
+        "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out.",
+        "SL_HIT": f"🛑 {mention}**STOP LOSS HIT**\nPrice hit SL at `{price:,.2f}`. Position closed."
     }
     
-    send_discord(f"🤖 **HSH Dynamic TP**\n{messages[trigger]}\nATR(48): `{atr:,.2f}`")
-
-    def notify_dynamic_tp(trigger: str, price: float, trail: float, score: float, atr: float) -> None:
-        mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
-        messages = {
-            "TP_UPDATED": f"📈 TP Adjusted → `{price:,.2f}` THB\nTrail Level: `{trail:,.2f}`",
-            "BREAKEVEN_LOCK": f"🔒 Breakeven Locked\nTrail fixed at `{trail:,.2f}`. Downside risk removed.",
-            "TRAIL_HIT": f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\nPrice hit trail at `{trail:,.2f}`. Consider closing now.\nCurrent Score: `{score:.4f}`",
-            "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out."
-        }
-        send_discord(f"🤖 **HSH Dynamic TP**\n{messages[trigger]}\nATR(48): `{atr:,.2f}`")
+    msg_content = messages.get(trigger, f"❓ Unknown Trigger (`{trigger}`) at `{price:,.2f}`")
+    send_discord(f"🤖 **HSH Dynamic TP**\n{msg_content}\nATR(48): `{atr:,.2f}`")

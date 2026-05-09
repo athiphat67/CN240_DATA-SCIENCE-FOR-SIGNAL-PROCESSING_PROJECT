@@ -1,10 +1,13 @@
 import logging
+import uuid
 from datetime import datetime
+# pyrefly: ignore [missing-import]
 from apscheduler.schedulers.blocking import BlockingScheduler
+# pyrefly: ignore [missing-import]
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 from config.settings import TIMEZONE, DRY_RUN, STATE_EMPTY, STATE_HOLDING
-from config.settings import TP_ATR_MULTIPLIER, TP_BREAKEVEN_ATR_MULT, TP_SCORE_DROP_THRESH
+from config.settings import TP_ATR_MULTIPLIER, TP_BREAKEVEN_ATR_MULT, TP_SCORE_DROP_THRESH, TP_SL_ATR_MULT
 from core.candle_builder import build_candles
 from core.feature_engine import compute_features
 from core.model_inference import run_inference
@@ -48,26 +51,30 @@ def run_signal_pipeline() -> None:
         _last_state    = gate_result["state_before"]
 
         # ─── 🆕 TP Manager: Activate / Reset ─────────────────────────────────
+        just_activated = False
         if gate_result["passed"]:
             if gate_result["signal_type"] == "BUY":
-                sl_price = gate_result["hsh_ask"] - (features_row["F_ATR_48"] * 1.0)
+                sl_price = gate_result["hsh_ask"] - (features_row["F_ATR_48"] * TP_SL_ATR_MULT)
                 tp_manager.activate(
                     entry_ask=gate_result["hsh_ask"],
                     entry_score=gate_result["ranker_score"],
                     initial_bid=gate_result["hsh_bid"],
                     sl_price=sl_price
                 )
+                just_activated = True
             elif gate_result["signal_type"] == "SELL":
                 tp_manager.reset()
 
         # ─── 🆕 TP Manager: Evaluate every M10 bar ───────────────────────────
-        tp_trigger, tp_price, trail_level = tp_manager.update(
-            current_bid=features_row["hsh_close_bid"],
-            atr_48=features_row["F_ATR_48"],
-            current_score=inference_result["ranker_score"]
-        )
-        if tp_trigger != "NONE":
-            notify_dynamic_tp(tp_trigger, tp_price, trail_level, inference_result["ranker_score"], features_row["F_ATR_48"])
+        tp_trigger = "NONE"
+        if not just_activated:
+            tp_trigger, tp_price, trail_level = tp_manager.update(
+                current_bid=features_row["hsh_close_bid"],
+                atr_48=features_row["F_ATR_48"],
+                current_score=inference_result["ranker_score"]
+            )
+            if tp_trigger != "NONE":
+                notify_dynamic_tp(tp_trigger, tp_price, trail_level, inference_result["ranker_score"], features_row["F_ATR_48"])
 
         # 🚨 FORCED EXIT LOGIC (SL Hit หรือ Trail Hit)
         if tp_trigger in ("TRAIL_HIT", "SL_HIT"):
@@ -79,28 +86,10 @@ def run_signal_pipeline() -> None:
             update_state(STATE_EMPTY)
             set_state(STATE_EMPTY)
 
-            # 2. บันทึก Forced SELL Record
-            forced_signal_id = f"tp_{features_row['bar_time'][:19].replace('-','').replace(':','').replace('T','_')}"
-            forced_sell_record = {
-                "id"            : forced_signal_id,
-                "bar_time"      : features_row["bar_time"],
-                "session"       : features_row["session"],
-                "signal_type"   : "SELL",
-                "ranker_score"  : inference_result["ranker_score"],
-                "state_before"  : "HOLDING",
-                "hsh_ask_price" : features_row["hsh_close_ask"],
-                "hsh_bid_price" : exit_bid_price,
-                "xau_price"     : features_row["xau_close"],
-                "atr_at_signal" : features_row["F_ATR_48"],
-                "passed"        : True,
-                "reject_reason" : f"FORCED_BY_{tp_trigger}",
-                "dry_run"       : DRY_RUN,
-                "features_snap" : inference_result["features_snap"],
-                "created_at"    : datetime.now(TZ).isoformat(),
-            }
-            insert_signal(forced_sell_record)
-
-            # 3. ✅ ใช้ Template Rationale เดิม + เติมเหตุผล Auto-Exit
+            # 2. ✅ Build rationale FIRST using bearish SELL template
+            # so the DB record and Discord notification both contain rationale.
+            # The SHAP bearish drivers describe WHY the position lost momentum,
+            # then we prepend the explicit auto-exit trigger reason on top.
             rationale_payload = build_trade_payload(
                 signal_type   = "SELL",
                 ranker_score  = inference_result["ranker_score"],
@@ -109,13 +98,37 @@ def run_signal_pipeline() -> None:
                 current_ask   = features_row["hsh_close_ask"],
                 current_bid   = exit_bid_price,
             )
+            # 3. ✅ ใช้ Template Rationale เดิม + เติมเหตุผล Auto-Exit
             rationale_payload["rationale_text"] = (
-                f"🤖 **Auto-Exit Trigger:** {reason_text} @ `{exit_bid_price:,.2f}` THB\n"
+                f"🤖 **Auto-Exit Trigger:** {reason_text} @ `{exit_bid_price:,.2f}` THB\n\n"
                 f"{rationale_payload.get('rationale_text', '')}"
             )
             rationale_payload["execution_price"] = exit_bid_price
 
-            # 4. แจ้ง Discord ผ่านโครงสร้างเดิม
+            # 3. ✅ Assemble DB record WITH rationale — insert AFTER payload is ready
+            forced_signal_id = f"tp_{features_row['bar_time'][:19].replace('-','').replace(':','').replace('T','_')}_{uuid.uuid4().hex[:6]}"
+            forced_sell_record = {
+                "id"                : forced_signal_id,
+                "bar_time"          : features_row["bar_time"],
+                "session"           : features_row["session"],
+                "signal_type"       : "SELL",
+                "ranker_score"      : inference_result["ranker_score"],
+                "state_before"      : "HOLDING",
+                "hsh_ask_price"     : features_row["hsh_close_ask"],
+                "hsh_bid_price"     : exit_bid_price,
+                "xau_price"         : features_row["xau_close"],
+                "atr_at_signal"     : features_row["F_ATR_48"],
+                "passed"            : True,
+                "reject_reason"     : f"FORCED_BY_{tp_trigger}",
+                "dry_run"           : DRY_RUN,
+                "features_snap"     : inference_result["features_snap"],
+                "rationale_text"    : rationale_payload["rationale_text"],
+                "top_shap_features" : rationale_payload.get("top_shap_features", {}),
+                "created_at"        : datetime.now(TZ).isoformat(),
+            }
+            insert_signal(forced_sell_record)
+
+            # 4. ✅ Notify Discord using notify_sell_signal — same template as normal SELL
             forced_gate_result = {
                 "bar_time"      : features_row["bar_time"],
                 "session"       : features_row["session"],

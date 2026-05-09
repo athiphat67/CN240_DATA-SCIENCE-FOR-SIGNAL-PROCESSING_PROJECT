@@ -16,14 +16,20 @@ def recover_tp_state() -> None:
         return
     try:
         client = get_supabase_client()
-        res = client.table("signals").select("hsh_ask_price, hsh_bid_price, ranker_score")\
+        from config.settings import TP_SL_ATR_MULT
+        res = client.table("signals").select("hsh_ask_price, hsh_bid_price, ranker_score, atr_at_signal")\
             .eq("signal_type", "BUY").eq("passed", True).order("created_at", desc=True).limit(1).execute()
         if res.data and not tp_manager.is_active:
             last_buy = res.data[0]
+            entry_ask = float(last_buy["hsh_ask_price"])
+            atr = last_buy.get("atr_at_signal")
+            sl_price = entry_ask - (float(atr) * TP_SL_ATR_MULT) if atr else None
+            
             tp_manager.activate(
-                entry_ask=float(last_buy["hsh_ask_price"]),
+                entry_ask=entry_ask,
                 entry_score=float(last_buy["ranker_score"]),
-                initial_bid=float(last_buy["hsh_bid_price"])
+                initial_bid=float(last_buy["hsh_bid_price"]),
+                sl_price=sl_price
             )
             log.info("[Startup] TP Manager recovered from last BUY signal")
     except Exception as e:

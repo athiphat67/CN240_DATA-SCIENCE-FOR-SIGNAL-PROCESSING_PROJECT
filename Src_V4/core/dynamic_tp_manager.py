@@ -50,21 +50,25 @@ class DynamicTPManager:
         if not self.is_active or current_bid is None or atr_48 is None or atr_48 <= 0:
             return "NONE", None, 0.0
 
-        self.highest_bid = max(self.highest_bid, current_bid)
-        raw_trail = self.highest_bid - (atr_48 * self.atr_mult)
-        be_floor = self.entry_ask + max(2.0, atr_48 * 0.15)
-        active_trail = max(raw_trail, be_floor)
-
-        # 🔴 Priority 1: SL Hit
+        # 🔴 Priority 1: SL Hit — check BEFORE updating highest_bid
+        # so that a gap-down below SL does not pollute the highest_bid state
         if self.sl_price is not None and current_bid <= self.sl_price:
             return "SL_HIT", self.sl_price, self.sl_price
+
+        self.highest_bid = max(self.highest_bid, current_bid)
+        raw_trail = self.highest_bid - (atr_48 * self.atr_mult)
+        be_floor = self.entry_ask + max(2.0, atr_48 * self.be_mult)
+        active_trail = max(raw_trail, be_floor)
 
         # 🔴 Priority 2: Trail Hit
         if current_bid <= active_trail:
             return "TRAIL_HIT", active_trail, active_trail
 
         # 🔒 Priority 3: Breakeven Lock
-        if not self._breakeven_locked and active_trail == be_floor:
+        # Fire when be_floor is clamping the trail (raw_trail <= be_floor),
+        # meaning the position has not yet moved far enough for the
+        # trailing stop to surpass the breakeven floor.
+        if not self._breakeven_locked and raw_trail <= be_floor:
             self._breakeven_locked = True
             return "BREAKEVEN_LOCK", be_floor, active_trail
 
