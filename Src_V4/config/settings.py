@@ -1,4 +1,5 @@
 import os
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -50,6 +51,7 @@ SPREAD_NORM_WINDOW  = 144
 GATE_SRVR_MIN           = 0.15
 GATE_SPREAD_NORM_MAX    = 2.5
 GATE_REGIME_REQUIRED    = 1
+BUY_GATE_MODE           = os.getenv("BUY_GATE_MODE", "STRICT")  # STRICT | LIVE_RELAXED
 
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -67,3 +69,12 @@ TRADE_LOG_API_KEY = os.getenv("TRADE_LOG_API_KEY", "")
 TP_ATR_MULTIPLIER       = 1.5   # Trail distance
 TP_BREAKEVEN_ATR_MULT   = 1.0   # Lock trail after this profit
 TP_SCORE_DROP_THRESH    = 0.15  # Early warning threshold
+
+# ─── Execution Confirmation ──────────────────────────────────────────────────
+REQUIRE_BUY_CONFIRM = os.getenv("REQUIRE_BUY_CONFIRM", "true").lower() == "true"
+AUTO_CONFIRM_SELL   = os.getenv("AUTO_CONFIRM_SELL", "true").lower() == "true"
+
+SIGNALS_TABLE       = os.getenv("SIGNALS_TABLE", "v3_signals")
+BAR_LOGS_TABLE      = os.getenv("BAR_LOGS_TABLE", "v3_bar_logs")
+SYSTEM_STATE_TABLE  = os.getenv("SYSTEM_STATE_TABLE", "v3_system_state")
+ACTIVE_TRADES_TABLE = os.getenv("ACTIVE_TRADES_TABLE", "v3_active_trades")

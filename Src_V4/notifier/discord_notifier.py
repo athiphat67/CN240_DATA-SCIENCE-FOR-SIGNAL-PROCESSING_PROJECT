@@ -41,6 +41,7 @@ def notify_buy_signal(gate_result: dict, rationale_payload: Optional[dict] = Non
         f"ATR(48)     : {atr:.2f} THB  ← ใช้ตั้ง TP/SL\n"
         f"TP แนะนำ    : {tp_ref:,.2f} (1.5× ATR)\n"
         f"SL แนะนำ    : {sl_ref:,.2f} (1.0× ATR)\n```\n"
+        f"⚠️ **Status: WAITING CONFIRM** — Execute ที่ HSH แล้วกด Confirm BUY ใน UI\n"
     )
     if rationale_payload and rationale_payload.get("rationale_text"):
         msg += f"📊 **Rationale:** {rationale_payload['rationale_text']}"
@@ -80,17 +81,30 @@ def notify_dynamic_tp(trigger: str, price: float, trail: float, score: float, at
         "TP_UPDATED": f"📈 TP Adjusted → `{price:,.2f}` THB\nTrail Level: `{trail:,.2f}`",
         "BREAKEVEN_LOCK": f"🔒 Breakeven Locked\nTrail fixed at `{trail:,.2f}`. Downside risk removed.",
         "TRAIL_HIT": f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\nPrice hit trail at `{trail:,.2f}`. Consider closing now.\nCurrent Score: `{score:.4f}`",
+        "SL_HIT": f"🛑 {mention}**STOP LOSS HIT**\nCurrent price hit SL at `{trail:,.2f}`. Exit required.\nCurrent Score: `{score:.4f}`",
         "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out."
     }
     
-    send_discord(f"🤖 **HSH Dynamic TP**\n{messages[trigger]}\nATR(48): `{atr:,.2f}`")
+    body = messages.get(trigger, f"ℹ️ TP Event `{trigger}` | price={price} | trail={trail} | score={score:.4f}")
+    send_discord(f"🤖 **HSH Dynamic TP**\n{body}\nATR(48): `{atr:,.2f}`")
 
-    def notify_dynamic_tp(trigger: str, price: float, trail: float, score: float, atr: float) -> None:
-        mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
-        messages = {
-            "TP_UPDATED": f"📈 TP Adjusted → `{price:,.2f}` THB\nTrail Level: `{trail:,.2f}`",
-            "BREAKEVEN_LOCK": f"🔒 Breakeven Locked\nTrail fixed at `{trail:,.2f}`. Downside risk removed.",
-            "TRAIL_HIT": f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\nPrice hit trail at `{trail:,.2f}`. Consider closing now.\nCurrent Score: `{score:.4f}`",
-            "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out."
-        }
-        send_discord(f"🤖 **HSH Dynamic TP**\n{messages[trigger]}\nATR(48): `{atr:,.2f}`")
+def notify_buy_confirmed(signal_id: str, price: float, note: str = "") -> None:
+    mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
+    send_discord(
+        f"{mention}\n✅ **BUY CONFIRMED**\n"
+        f"Signal ID: `{signal_id}`\n"
+        f"Executed Ask: `{price:,.2f}` THB\n"
+        f"State → `HOLDING`\n"
+        f"{note}"
+    )
+
+def notify_sell_confirmed(price: float, reason: str = "MANUAL_SELL", signal_id: str | None = None) -> None:
+    mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
+    sig_line = f"Signal ID: `{signal_id}`\n" if signal_id else ""
+    send_discord(
+        f"{mention}\n✅ **SELL CONFIRMED**\n"
+        f"{sig_line}"
+        f"Executed Bid: `{price:,.2f}` THB\n"
+        f"Reason: `{reason}`\n"
+        f"State → `EMPTY`"
+    )

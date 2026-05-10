@@ -12,7 +12,7 @@ from core.signal_gate import evaluate_signal_gate
 from core.signal_recorder import build_signal_record
 from core.state_manager import get_current_state, set_state
 from core.dynamic_tp_manager import DynamicTPManager
-from db.supabase_writer import insert_signal, insert_bar_log, update_state
+from db.supabase_writer import insert_signal, insert_bar_log, update_state, get_open_trade, close_open_trade
 from notifier.discord_notifier import notify_buy_signal, notify_sell_signal, notify_heartbeat, notify_error, notify_dynamic_tp
 from rationale.generator import build_trade_payload
 
@@ -29,6 +29,42 @@ tp_manager = DynamicTPManager(
     breakeven_atr_mult=TP_BREAKEVEN_ATR_MULT,
     score_drop_threshold=TP_SCORE_DROP_THRESH
 )
+
+def sync_tp_state_from_db(features_row: dict | None = None) -> None:
+    """Sync in-memory TP manager กับ DB state / active trade"""
+    state = get_current_state()
+
+    if state == STATE_EMPTY:
+        if tp_manager.is_active:
+            tp_manager.reset()
+            trading_log.info("[TP Sync] Reset TP manager because DB state is EMPTY")
+        return
+
+    if state == STATE_HOLDING and not tp_manager.is_active:
+        active_trade = get_open_trade()
+        if not active_trade:
+            trading_log.warning("[TP Sync] DB state HOLDING but no active trade found")
+            return
+
+        entry_ask = float(active_trade["entry_ask"])
+        entry_score = float(active_trade["entry_score"])
+        initial_bid = float(active_trade.get("entry_bid_at_signal") or entry_ask)
+
+        atr_48 = None
+        if features_row:
+            atr_48 = features_row.get("F_ATR_48")
+
+        sl_price = None
+        if atr_48 and float(atr_48) > 0:
+            sl_price = entry_ask - (float(atr_48) * 1.0)
+
+        tp_manager.activate(
+            entry_ask=entry_ask,
+            entry_score=entry_score,
+            initial_bid=initial_bid,
+            sl_price=sl_price,
+        )
+        trading_log.info("[TP Sync] TP manager activated from active trade")
 
 def run_signal_pipeline() -> None:
     global _last_bar_time, _last_score, _last_state
@@ -47,33 +83,29 @@ def run_signal_pipeline() -> None:
         gate_result    = evaluate_signal_gate(inference_result, features_row)
         _last_state    = gate_result["state_before"]
 
-        # ─── 🆕 TP Manager: Activate / Reset ─────────────────────────────────
-        if gate_result["passed"]:
-            if gate_result["signal_type"] == "BUY":
-                sl_price = gate_result["hsh_ask"] - (features_row["F_ATR_48"] * 1.0)
-                tp_manager.activate(
-                    entry_ask=gate_result["hsh_ask"],
-                    entry_score=gate_result["ranker_score"],
-                    initial_bid=gate_result["hsh_bid"],
-                    sl_price=sl_price
-                )
-            elif gate_result["signal_type"] == "SELL":
-                tp_manager.reset()
+        # ─── 🆕 TP Manager: Sync and Evaluate ───────────────────────────
+        current_state = get_current_state()
+        sync_tp_state_from_db(features_row)
 
-        # ─── 🆕 TP Manager: Evaluate every M10 bar ───────────────────────────
-        tp_trigger, tp_price, trail_level = tp_manager.update(
-            current_bid=features_row["hsh_close_bid"],
-            atr_48=features_row["F_ATR_48"],
-            current_score=inference_result["ranker_score"]
-        )
-        if tp_trigger != "NONE":
-            notify_dynamic_tp(tp_trigger, tp_price, trail_level, inference_result["ranker_score"], features_row["F_ATR_48"])
+        if current_state == STATE_HOLDING and tp_manager.is_active:
+            tp_trigger, tp_price, trail_level = tp_manager.update(
+                current_bid=features_row["hsh_close_bid"],
+                atr_48=features_row["F_ATR_48"],
+                current_score=inference_result["ranker_score"]
+            )
+            if tp_trigger != "NONE":
+                notify_dynamic_tp(tp_trigger, tp_price, trail_level, inference_result["ranker_score"], features_row["F_ATR_48"])
+        else:
+            tp_trigger, tp_price, trail_level = "NONE", None, 0.0
 
         # 🚨 FORCED EXIT LOGIC (SL Hit หรือ Trail Hit)
         if tp_trigger in ("TRAIL_HIT", "SL_HIT"):
-            reason_text = "Trailing Stop Hit" if tp_trigger == "TRAIL_HIT" else "Stop Loss Hit"
-            exit_bid_price = features_row["hsh_close_bid"]  # ✅ ใช้ Bid Price เป็นจุดออก
-            system_log.info(f"[TP] {reason_text} @ {exit_bid_price:.2f}. Forcing SELL signal.")
+            if current_state != STATE_HOLDING or not tp_manager.is_active:
+                trading_log.warning(f"[TP] Ignored {tp_trigger} because state={current_state}, tp_active={tp_manager.is_active}")
+            else:
+                reason_text = "Trailing Stop Hit" if tp_trigger == "TRAIL_HIT" else "Stop Loss Hit"
+                exit_bid_price = features_row["hsh_close_bid"]  # ✅ ใช้ Bid Price เป็นจุดออก
+                system_log.info(f"[TP] {reason_text} @ {exit_bid_price:.2f}. Forcing SELL signal.")
 
             # 1. Override State → EMPTY
             update_state(STATE_EMPTY)
@@ -125,7 +157,12 @@ def run_signal_pipeline() -> None:
             }
             notify_sell_signal(forced_gate_result, rationale_payload)
 
-            # 5. Reset TP Manager & จบ Pipeline (กัน Duplicate)
+            # 5. Reset TP Manager, Close Active Trade & จบ Pipeline (กัน Duplicate)
+            close_open_trade(
+                exit_signal_id=forced_signal_id,
+                exit_bid=exit_bid_price,
+                exit_reason=tp_trigger,
+            )
             tp_manager.reset()
             trading_log.info(f"FORCED SELL executed by {tp_trigger} | Bid Price: {exit_bid_price:.2f}")
             return  # 🔚 จบรอบนี้ทันที
@@ -138,8 +175,14 @@ def run_signal_pipeline() -> None:
             feature_names = inference_result.get("feature_names", []),
             current_ask   = gate_result["hsh_ask"],
             current_bid   = gate_result["hsh_bid"],
+            state_before  = gate_result["state_before"]
         )
         signal_record = build_signal_record(gate_result, rationale_payload)
+        
+        if gate_result["passed"] and gate_result["signal_type"] == "BUY":
+            signal_record["execution_status"] = "PENDING_CONFIRM"
+        elif gate_result["passed"] and gate_result["signal_type"] == "SELL":
+            signal_record["execution_status"] = "CONFIRMED"
 
         # ─── P6: Write to Supabase ────────────────────────────────────────────
         insert_signal(signal_record)
@@ -160,14 +203,20 @@ def run_signal_pipeline() -> None:
         if gate_result["passed"] and gate_result["signal_type"]:
             signal_type = gate_result["signal_type"]
             if signal_type == "BUY":
-                update_state(STATE_HOLDING)
-                set_state(STATE_HOLDING)
+                # ห้ามเปลี่ยน position state ตอนนี้
                 notify_buy_signal(gate_result, rationale_payload)
-                trading_log.info(f"BUY signal sent | score={_last_score:.4f}")
+                signal_id = signal_record.get('id') if 'id' in signal_record else gate_result.get('signal_id', 'UNKNOWN')
+                trading_log.info(f"BUY signal sent — WAITING_CONFIRM | score={_last_score:.4f} | signal_id={signal_id}")
             elif signal_type == "SELL":
                 update_state(STATE_EMPTY)
                 set_state(STATE_EMPTY)
+                close_open_trade(
+                    exit_signal_id=signal_record.get("id"),
+                    exit_bid=gate_result["hsh_bid"],
+                    reason="MODEL_SELL"
+                )
                 notify_sell_signal(gate_result, rationale_payload)
+                tp_manager.reset()
                 trading_log.info(f"SELL signal sent | score={_last_score:.4f}")
         else:
             trading_log.info(f"HOLD | state={_last_state} | score={_last_score:.4f} | reject={gate_result['reject_reason']}")

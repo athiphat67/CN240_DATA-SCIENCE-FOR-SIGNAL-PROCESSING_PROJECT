@@ -26,7 +26,9 @@ except ImportError:
 
 from config.settings import STATE_EMPTY, STATE_HOLDING, SUPABASE_URL, SUPABASE_KEY
 from core.state_manager import get_current_state, set_state
-from db.supabase_writer import update_state
+from db.supabase_writer import update_state, get_latest_pending_buy_signal, mark_signal_execution, open_trade_from_signal, close_open_trade, get_signal_by_id
+from notifier.trade_log_api import send_trade_log
+from notifier.discord_notifier import notify_buy_confirmed, notify_sell_confirmed
 from supabase import create_client
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -43,44 +45,39 @@ def _get_supabase():
 def fetch_dashboard():
     """ดึงข้อมูล State + Signal ล่าสุด"""
     try:
-        client = _get_supabase()
         now_str = datetime.now(TZ_BKK).strftime("%H:%M:%S")
 
         # ── State ──────────────────────────────────────────────────────────
         current_state = get_current_state()
         state_icon    = "🟢 HOLDING" if current_state == STATE_HOLDING else "⚪ EMPTY"
 
-        # ── Latest Signal ──────────────────────────────────────────────────
-        sig_res = (
-            client.table("v3_signals")
-            .select("bar_time, signal_type, ranker_score, passed, reject_reason, hsh_ask_price, hsh_bid_price, rationale_text, session")
-            .order("bar_time", desc=True)
-            .limit(1)
-            .execute()
-        )
+        # ── Latest Pending BUY ──────────────────────────────────────────────
+        s = get_latest_pending_buy_signal()
 
-        if not sig_res.data:
+        if not s:
             return (
                 state_icon, current_state,
-                "ไม่พบสัญญาณ", "-", "-", "-", "-", "-",
+                "-",
+                "ไม่พบ PENDING BUY", "-", "-", "-", "-", "-",
                 f"✅ โหลดสำเร็จ | {now_str}"
             )
 
-        s           = sig_res.data[0]
+        signal_id   = s.get("id", "-")
         bar_time    = s.get("bar_time", "-")
         sig_type    = s.get("signal_type", "-")
         score       = float(s.get("ranker_score", 0))
         passed      = s.get("passed", False)
-        reason      = s.get("reject_reason") or "passed ✅"
+        reason      = s.get("execution_status") or "PENDING_CONFIRM"
         ask         = s.get("hsh_ask_price", "-")
         bid         = s.get("hsh_bid_price", "-")
         session     = s.get("session", "-")
         rationale   = s.get("rationale_text", "-")
 
-        sig_label = f"{'✅' if passed else '🔴'} {sig_type} | score={score:.4f} | {session}"
+        sig_label = f"⏳ PENDING {sig_type} | score={score:.4f} | {session}"
 
         return (
             state_icon, current_state,
+            str(signal_id),
             sig_label,
             str(bar_time),
             f"{float(ask):,.2f} THB" if ask != "-" else "-",
@@ -91,14 +88,14 @@ def fetch_dashboard():
         )
 
     except Exception as e:
-        return ("❌ Error", "UNKNOWN", str(e), "-", "-", "-", "-", "-", f"❌ {e}")
+        return ("❌ Error", "UNKNOWN", "-", str(e), "-", "-", "-", "-", "-", f"❌ {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Trade Actions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def confirm_buy(price_str: str):
+def confirm_buy(price_str: str, signal_id: str):
     """ยืนยัน BUY → State: HOLDING"""
     try:
         if not price_str.strip():
@@ -112,8 +109,23 @@ def confirm_buy(price_str: str):
         if current == STATE_HOLDING:
             return "⚠️ State เป็น HOLDING อยู่แล้ว — ไม่ต้องทำอะไร"
 
-        update_state(STATE_HOLDING)
+        if not signal_id or signal_id == "-":
+            s = get_latest_pending_buy_signal()
+            if not s:
+                return "❌ ไม่พบ PENDING BUY ให้ Confirm"
+            signal_id = s["id"]
+        else:
+            s = get_signal_by_id(signal_id)
+            if not s:
+                return f"❌ ไม่พบ Signal ID: {signal_id}"
+
+        open_trade_from_signal(s, price)
+        mark_signal_execution(signal_id, "CONFIRMED", price)
+
+        update_state(STATE_HOLDING) # DB legacy fallback
         set_state(STATE_HOLDING)
+        send_trade_log("BUY", price, "MANUAL_BUY_CONFIRMED")
+        notify_buy_confirmed(signal_id, price)
 
         now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
         return f"✅ BUY Confirmed! | ราคา {price:,.2f} THB | State → HOLDING | {now_str}"
@@ -138,8 +150,11 @@ def confirm_sell(price_str: str):
         if current == STATE_EMPTY:
             return "⚠️ State เป็น EMPTY อยู่แล้ว — ไม่มี Position ที่จะปิด"
 
-        update_state(STATE_EMPTY)
+        close_open_trade(exit_bid=price, reason="MANUAL_SELL_CONFIRMED")
+        update_state(STATE_EMPTY) # DB legacy fallback
         set_state(STATE_EMPTY)
+        send_trade_log("SELL", price, "MANUAL_SELL_CONFIRMED")
+        notify_sell_confirmed(price, "MANUAL_SELL_CONFIRMED")
 
         now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
         return f"✅ SELL Confirmed! | ราคา {price:,.2f} THB | State → EMPTY | {now_str}"
@@ -181,7 +196,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
             status_disp  = gr.Textbox(label="Last Refresh", interactive=False)
 
         with gr.Column(scale=2):
-            gr.Markdown("### 📡 สัญญาณล่าสุด")
+            gr.Markdown("### 📡 Pending BUY ล่าสุด")
+            signal_id_disp  = gr.Textbox(label="Signal ID", interactive=False)
             sig_label_disp  = gr.Textbox(label="Signal", interactive=False)
             bar_time_disp   = gr.Textbox(label="Bar Time", interactive=False)
             with gr.Row():
@@ -202,6 +218,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
             buy_price_input = gr.Textbox(
                 label="ราคา Ask ที่ Execute (THB)",
                 placeholder="เช่น 71930"
+            )
+            buy_signal_id_input = gr.Textbox(
+                label="Signal ID (เว้นว่างเพื่อใช้ PENDING ล่าสุด)",
+                placeholder="sig_..."
             )
             btn_buy    = gr.Button("✅ Confirm BUY → State: HOLDING", variant="primary")
             buy_status = gr.Textbox(label="Status", interactive=False)
@@ -232,6 +252,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
     # ── All Outputs List ──────────────────────────────────────────────────────
     _dashboard_outputs = [
         state_disp, state_raw,
+        signal_id_disp,
         sig_label_disp, bar_time_disp,
         ask_disp, bid_disp,
         reason_disp, rationale_disp,
@@ -243,7 +264,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
 
     btn_buy.click(
         fn=confirm_buy,
-        inputs=[buy_price_input],
+        inputs=[buy_price_input, buy_signal_id_input],
         outputs=[buy_status],
     ).then(fn=fetch_dashboard, inputs=[], outputs=_dashboard_outputs)
 

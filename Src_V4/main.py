@@ -15,17 +15,15 @@ def recover_tp_state() -> None:
     if DRY_RUN or get_current_state() != "HOLDING":
         return
     try:
-        client = get_supabase_client()
-        res = client.table("signals").select("hsh_ask_price, hsh_bid_price, ranker_score")\
-            .eq("signal_type", "BUY").eq("passed", True).order("created_at", desc=True).limit(1).execute()
-        if res.data and not tp_manager.is_active:
-            last_buy = res.data[0]
+        from db.supabase_writer import get_open_trade
+        active_trade = get_open_trade()
+        if active_trade and not tp_manager.is_active:
             tp_manager.activate(
-                entry_ask=float(last_buy["hsh_ask_price"]),
-                entry_score=float(last_buy["ranker_score"]),
-                initial_bid=float(last_buy["hsh_bid_price"])
+                entry_ask=float(active_trade["entry_ask"]),
+                entry_score=float(active_trade["entry_score"]),
+                initial_bid=float(active_trade.get("entry_bid_at_signal") or active_trade["entry_ask"])
             )
-            log.info("[Startup] TP Manager recovered from last BUY signal")
+            log.info("[Startup] TP Manager recovered from active trade")
     except Exception as e:
         log.warning(f"[Startup] TP state recovery failed: {e}")
 
