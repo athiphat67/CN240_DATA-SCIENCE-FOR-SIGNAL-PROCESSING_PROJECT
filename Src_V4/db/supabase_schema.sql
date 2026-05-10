@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS v3_active_trades (
 );
 CREATE INDEX IF NOT EXISTS idx_active_trades_status ON v3_active_trades(status);
 CREATE INDEX IF NOT EXISTS idx_active_trades_entry_signal ON v3_active_trades(entry_signal_id);
+CREATE INDEX IF NOT EXISTS idx_active_trades_exit_signal
+ON public.v3_active_trades(exit_signal_id);
 
 -- ─── Table 4: bar_logs (Debug & Retrain) ───────────────────────────────────
 CREATE TABLE IF NOT EXISTS v3_bar_logs (
@@ -75,3 +77,31 @@ CREATE TABLE IF NOT EXISTS v3_bar_logs (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_bar_logs_bar_time ON v3_bar_logs(bar_time DESC);
+
+ALTER TABLE public.v3_signals
+ADD COLUMN IF NOT EXISTS rationale_text TEXT,
+ADD COLUMN IF NOT EXISTS top_shap_features JSONB,
+ADD COLUMN IF NOT EXISTS execution_status TEXT DEFAULT 'SIGNAL_ONLY',
+ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS confirmed_price NUMERIC(10,2),
+ADD COLUMN IF NOT EXISTS confirm_note TEXT,
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+-- Optional but strongly recommended:
+-- enforce only one OPEN trade at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_one_open_trade
+ON public.v3_active_trades (status)
+WHERE status = 'OPEN';
+
+-- Helpful indexes for execution flow.
+CREATE INDEX IF NOT EXISTS idx_signals_execution_status
+ON public.v3_signals(execution_status);
+
+CREATE INDEX IF NOT EXISTS idx_signals_pending_buy
+ON public.v3_signals(bar_time DESC)
+WHERE signal_type = 'BUY'
+  AND passed = true
+  AND execution_status IN ('PENDING_CONFIRM', 'SIGNAL_ONLY');
+
+-- Reload Supabase/PostgREST schema cache.
+NOTIFY pgrst, 'reload schema';

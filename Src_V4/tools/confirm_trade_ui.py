@@ -8,6 +8,7 @@ Manual Trade Confirmation UI
 """
 import os
 import sys
+import logging
 
 # ── Path Setup ────────────────────────────────────────────────────────────────
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -26,13 +27,22 @@ except ImportError:
 
 from config.settings import STATE_EMPTY, STATE_HOLDING, SUPABASE_URL, SUPABASE_KEY
 from core.state_manager import get_current_state, set_state
-from db.supabase_writer import update_state, get_latest_pending_buy_signal, mark_signal_execution, open_trade_from_signal, close_open_trade, get_signal_by_id
+from db.supabase_writer import (
+    get_latest_pending_buy_signal,
+    mark_signal_execution,
+    open_trade_from_signal,
+    close_open_trade,
+    get_signal_by_id,
+    insert_signal,
+)
 from notifier.trade_log_api import send_trade_log
 from notifier.discord_notifier import notify_buy_confirmed, notify_sell_confirmed
 from supabase import create_client
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 TZ_BKK = timezone(timedelta(hours=7))
+
+logger = logging.getLogger("trading")
 
 def _get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -119,10 +129,47 @@ def confirm_buy(price_str: str, signal_id: str):
             if not s:
                 return f"❌ ไม่พบ Signal ID: {signal_id}"
 
-        open_trade_from_signal(s, price)
-        mark_signal_execution(signal_id, "CONFIRMED", price)
+        # ── Validate BUY signal before opening trade ─────────────────────
+        if s.get("signal_type") != "BUY":
+            return "❌ This signal is not a BUY signal."
 
-        update_state(STATE_HOLDING) # DB legacy fallback
+        if not s.get("passed"):
+            return "❌ This BUY signal did not pass the gate."
+
+        execution_status = s.get("execution_status")
+        if execution_status not in ("PENDING_CONFIRM", "SIGNAL_ONLY", None):
+            return f"❌ This signal is not pending anymore. Current status: {execution_status}"
+
+        if s.get("state_before") != STATE_EMPTY:
+            return f"❌ Invalid signal state_before: {s.get('state_before')}. Expected EMPTY."
+
+        ok_trade = open_trade_from_signal(s, price)
+        if not ok_trade:
+            return "❌ Failed to open active trade. State was NOT changed."
+
+        ok_mark = mark_signal_execution(signal_id, "CONFIRMED", price)
+        if not ok_mark:
+            # Trade เปิดใน v3_active_trades แล้ว
+            # ดังนั้น state ต้องเป็น HOLDING ให้ตรงกับ DB จริง
+            logger.warning(
+                f"[UI] mark_signal_execution failed but trade is OPEN — "
+                f"forcing state to HOLDING | signal_id={signal_id}"
+            )
+
+            set_state(STATE_HOLDING)
+            notify_buy_confirmed(
+                signal_id,
+                price,
+                note="⚠️ mark_signal failed — state forced to HOLDING"
+            )
+
+            now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
+            return (
+                f"⚠️ Trade opened @ {price:,.2f} THB แต่ mark signal ไม่สำเร็จ | "
+                f"State → HOLDING แล้ว | กรุณาตรวจสอบ v3_signals ใน Supabase | {now_str}"
+            )
+
+        # update_state(STATE_HOLDING)
         set_state(STATE_HOLDING)
         send_trade_log("BUY", price, "MANUAL_BUY_CONFIRMED")
         notify_buy_confirmed(signal_id, price)
@@ -150,8 +197,45 @@ def confirm_sell(price_str: str):
         if current == STATE_EMPTY:
             return "⚠️ State เป็น EMPTY อยู่แล้ว — ไม่มี Position ที่จะปิด"
 
-        close_open_trade(exit_bid=price, reason="MANUAL_SELL_CONFIRMED")
-        update_state(STATE_EMPTY) # DB legacy fallback
+        manual_sell_id = f"manual_sell_{datetime.now(TZ_BKK).strftime('%Y%m%d_%H%M%S')}"
+
+        manual_sell_record = {
+            "id": manual_sell_id,
+            "bar_time": datetime.now(TZ_BKK).isoformat(),
+            "session": "Manual",
+            "signal_type": "SELL",
+            "ranker_score": 0.0,
+            "state_before": STATE_HOLDING,
+            "hsh_ask_price": None,
+            "hsh_bid_price": price,
+            "xau_price": None,
+            "atr_at_signal": None,
+            "passed": True,
+            "reject_reason": None,
+            "dry_run": False,
+            "features_snap": {},
+            "rationale_text": "Manual SELL confirmed from confirm_trade_ui.py",
+            "top_shap_features": {},
+            "execution_status": "CONFIRMED",
+            "confirmed_price": price,
+            "confirmed_at": datetime.now(TZ_BKK).isoformat(),
+            "created_at": datetime.now(TZ_BKK).isoformat(),
+        }
+
+        ok_insert = insert_signal(manual_sell_record)
+        if not ok_insert:
+            return "❌ Failed to insert manual SELL signal. State was NOT changed."
+
+        ok_close = close_open_trade(
+            exit_bid=price,
+            exit_signal_id=manual_sell_id,
+            reason="MANUAL_SELL_CONFIRMED",
+        )
+
+        if not ok_close:
+            return "❌ Failed to close active trade. State was NOT changed."
+
+        # update_state(STATE_EMPTY) # DB legacy fallback
         set_state(STATE_EMPTY)
         send_trade_log("SELL", price, "MANUAL_SELL_CONFIRMED")
         notify_sell_confirmed(price, "MANUAL_SELL_CONFIRMED")
@@ -169,7 +253,7 @@ def force_reset_state(target: str):
     """Force reset State (กรณีฉุกเฉิน)"""
     try:
         new_state = STATE_HOLDING if target == "HOLDING" else STATE_EMPTY
-        update_state(new_state)
+        # update_state(new_state)
         set_state(new_state)
         now_str = datetime.now(TZ_BKK).strftime("%H:%M:%S")
         return f"✅ Force Reset → {new_state} | {now_str}"

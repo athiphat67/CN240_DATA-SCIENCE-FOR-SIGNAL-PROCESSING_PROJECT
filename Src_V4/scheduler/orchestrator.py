@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime
+# pyrefly: ignore [missing-import]
 from apscheduler.schedulers.blocking import BlockingScheduler
+# pyrefly: ignore [missing-import]
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 from config.settings import TIMEZONE, DRY_RUN, STATE_EMPTY, STATE_HOLDING
@@ -12,7 +14,7 @@ from core.signal_gate import evaluate_signal_gate
 from core.signal_recorder import build_signal_record
 from core.state_manager import get_current_state, set_state
 from core.dynamic_tp_manager import DynamicTPManager
-from db.supabase_writer import insert_signal, insert_bar_log, update_state, get_open_trade, close_open_trade
+from db.supabase_writer import insert_signal, insert_bar_log, get_open_trade, close_open_trade, mark_signal_execution
 from notifier.discord_notifier import notify_buy_signal, notify_sell_signal, notify_heartbeat, notify_error, notify_dynamic_tp
 from rationale.generator import build_trade_payload
 
@@ -101,45 +103,29 @@ def run_signal_pipeline() -> None:
         # 🚨 FORCED EXIT LOGIC (SL Hit หรือ Trail Hit)
         if tp_trigger in ("TRAIL_HIT", "SL_HIT"):
             if current_state != STATE_HOLDING or not tp_manager.is_active:
-                trading_log.warning(f"[TP] Ignored {tp_trigger} because state={current_state}, tp_active={tp_manager.is_active}")
-            else:
-                reason_text = "Trailing Stop Hit" if tp_trigger == "TRAIL_HIT" else "Stop Loss Hit"
-                exit_bid_price = features_row["hsh_close_bid"]  # ✅ ใช้ Bid Price เป็นจุดออก
-                system_log.info(f"[TP] {reason_text} @ {exit_bid_price:.2f}. Forcing SELL signal.")
+                trading_log.warning(
+                    f"[TP] Ignored {tp_trigger} because state={current_state}, "
+                    f"tp_active={tp_manager.is_active}"
+                )
+                return
 
-            # 1. Override State → EMPTY
-            update_state(STATE_EMPTY)
-            set_state(STATE_EMPTY)
-
-            # 2. บันทึก Forced SELL Record
+            reason_text = "Trailing Stop Hit" if tp_trigger == "TRAIL_HIT" else "Stop Loss Hit"
+            exit_bid_price = features_row["hsh_close_bid"]  # ใช้ Bid Price เป็นราคาขายจริง
             forced_signal_id = f"tp_{features_row['bar_time'][:19].replace('-','').replace(':','').replace('T','_')}"
-            forced_sell_record = {
-                "id"            : forced_signal_id,
-                "bar_time"      : features_row["bar_time"],
-                "session"       : features_row["session"],
-                "signal_type"   : "SELL",
-                "ranker_score"  : inference_result["ranker_score"],
-                "state_before"  : "HOLDING",
-                "hsh_ask_price" : features_row["hsh_close_ask"],
-                "hsh_bid_price" : exit_bid_price,
-                "xau_price"     : features_row["xau_close"],
-                "atr_at_signal" : features_row["F_ATR_48"],
-                "passed"        : True,
-                "reject_reason" : f"FORCED_BY_{tp_trigger}",
-                "dry_run"       : DRY_RUN,
-                "features_snap" : inference_result["features_snap"],
-                "created_at"    : datetime.now(TZ).isoformat(),
-            }
-            insert_signal(forced_sell_record)
 
-            # 3. ✅ ใช้ Template Rationale เดิม + เติมเหตุผล Auto-Exit
+            system_log.info(
+                f"[TP] {reason_text} @ {exit_bid_price:.2f}. Forcing SELL signal."
+            )
+
+            # 1. Build rationale first so DB record contains explanation
             rationale_payload = build_trade_payload(
                 signal_type   = "SELL",
                 ranker_score  = inference_result["ranker_score"],
-                shap_values   = inference_result.get("shap_values", {}),
+                shap_values   = inference_result.get("shap_values", []),
                 feature_names = inference_result.get("feature_names", []),
                 current_ask   = features_row["hsh_close_ask"],
                 current_bid   = exit_bid_price,
+                state_before  = STATE_HOLDING,
             )
             rationale_payload["rationale_text"] = (
                 f"🤖 **Auto-Exit Trigger:** {reason_text} @ `{exit_bid_price:,.2f}` THB\n"
@@ -147,26 +133,92 @@ def run_signal_pipeline() -> None:
             )
             rationale_payload["execution_price"] = exit_bid_price
 
-            # 4. แจ้ง Discord ผ่านโครงสร้างเดิม
+            # 2. Insert forced SELL signal first.
+            # This is required because active trade exit_signal_id may reference v3_signals(id).
+            forced_sell_record = {
+                "id"                : forced_signal_id,
+                "bar_time"          : features_row["bar_time"],
+                "session"           : features_row["session"],
+                "signal_type"       : "SELL",
+                "ranker_score"      : inference_result["ranker_score"],
+                "state_before"      : STATE_HOLDING,
+                "hsh_ask_price"     : features_row["hsh_close_ask"],
+                "hsh_bid_price"     : exit_bid_price,
+                "xau_price"         : features_row["xau_close"],
+                "atr_at_signal"     : features_row["F_ATR_48"],
+                "passed"            : True,
+                "reject_reason"     : f"FORCED_BY_{tp_trigger}",
+                "dry_run"           : DRY_RUN,
+                "features_snap"     : inference_result["features_snap"],
+                "rationale_text"    : rationale_payload.get("rationale_text"),
+                "top_shap_features" : rationale_payload.get("top_shap_features", {}),
+                "created_at"        : datetime.now(TZ).isoformat(),
+                "execution_status"  : "PENDING_AUTO_EXIT",
+            }
+
+            ok_insert = insert_signal(forced_sell_record)
+            if not ok_insert:
+                trading_log.error(
+                    f"[TP] Failed to insert forced SELL signal {forced_signal_id}. "
+                    f"State was NOT changed."
+                )
+                notify_error(
+                    "Forced SELL",
+                    f"Failed to insert forced SELL signal {forced_signal_id}. State was NOT changed."
+                )
+                return
+
+            # 3. Close active trade after forced SELL signal exists.
+            ok_close = close_open_trade(
+                exit_signal_id=forced_signal_id,
+                exit_bid=exit_bid_price,
+                exit_score=inference_result["ranker_score"],
+                reason=tp_trigger,
+            )
+
+            if not ok_close:
+                trading_log.error(
+                    f"[TP] Failed to close active trade for {tp_trigger}. "
+                    f"State was NOT changed. Bid={exit_bid_price:.2f}"
+                )
+                notify_error(
+                    "Forced SELL",
+                    f"Failed to close active trade for {tp_trigger}. State was NOT changed."
+                )
+                return
+
+            ok_mark = mark_signal_execution(
+                forced_signal_id,
+                "AUTO_EXITED",
+                exit_bid_price,
+                note=tp_trigger,
+            )
+            if not ok_mark:
+                trading_log.warning(
+                    f"[TP] Forced SELL closed trade but failed to mark signal "
+                    f"{forced_signal_id} as AUTO_EXITED"
+                )
+
+            # 4. Now state can safely become EMPTY
+            # update_state(STATE_EMPTY)
+            set_state(STATE_EMPTY)
+
+            # 5. Notify Discord
             forced_gate_result = {
-                "bar_time"      : features_row["bar_time"],
-                "session"       : features_row["session"],
-                "ranker_score"  : inference_result["ranker_score"],
-                "hsh_bid"       : exit_bid_price,
-                "xau_close"     : features_row["xau_close"]
+                "bar_time"     : features_row["bar_time"],
+                "session"      : features_row["session"],
+                "ranker_score" : inference_result["ranker_score"],
+                "hsh_bid"      : exit_bid_price,
+                "xau_close"    : features_row["xau_close"],
             }
             notify_sell_signal(forced_gate_result, rationale_payload)
 
-            # 5. Reset TP Manager, Close Active Trade & จบ Pipeline (กัน Duplicate)
-            close_open_trade(
-                exit_signal_id=forced_signal_id,
-                exit_bid=exit_bid_price,
-                exit_reason=tp_trigger,
-            )
+            # 6. Reset TP Manager and stop this pipeline cycle
             tp_manager.reset()
-            trading_log.info(f"FORCED SELL executed by {tp_trigger} | Bid Price: {exit_bid_price:.2f}")
-            return  # 🔚 จบรอบนี้ทันที
-
+            trading_log.info(
+                f"FORCED SELL executed by {tp_trigger} | Bid Price: {exit_bid_price:.2f}"
+            )
+            return
         # ─── P5: Build Signal Record ──────────────────────────────────────────
         rationale_payload = build_trade_payload(
             signal_type   = gate_result["signal_type"],
@@ -198,7 +250,7 @@ def run_signal_pipeline() -> None:
             "atr_48"        : features_row["F_ATR_48"],
             "features_snap" : signal_record["features_snap"],
         })
-
+        
         # ─── Action & State Update ────────────────────────────────────────────
         if gate_result["passed"] and gate_result["signal_type"]:
             signal_type = gate_result["signal_type"]
@@ -208,13 +260,25 @@ def run_signal_pipeline() -> None:
                 signal_id = signal_record.get('id') if 'id' in signal_record else gate_result.get('signal_id', 'UNKNOWN')
                 trading_log.info(f"BUY signal sent — WAITING_CONFIRM | score={_last_score:.4f} | signal_id={signal_id}")
             elif signal_type == "SELL":
-                update_state(STATE_EMPTY)
-                set_state(STATE_EMPTY)
-                close_open_trade(
+                ok_close = close_open_trade(
                     exit_signal_id=signal_record.get("id"),
                     exit_bid=gate_result["hsh_bid"],
-                    reason="MODEL_SELL"
+                    exit_score=inference_result["ranker_score"],
+                    reason="MODEL_SELL",
                 )
+
+                if not ok_close:
+                    trading_log.error(
+                        "[SELL] Failed to close active trade. State was NOT changed."
+                    )
+                    notify_error(
+                        "Model SELL",
+                        "Failed to close active trade. State was NOT changed."
+                    )
+                    return
+
+                # update_state(STATE_EMPTY)
+                set_state(STATE_EMPTY)
                 notify_sell_signal(gate_result, rationale_payload)
                 tp_manager.reset()
                 trading_log.info(f"SELL signal sent | score={_last_score:.4f}")
@@ -226,6 +290,7 @@ def run_signal_pipeline() -> None:
         notify_error("Job A — signal_pipeline", str(e))
 
 def run_heartbeat() -> None:
+    global _last_state
     try:
         state = get_current_state()
         _last_state = state

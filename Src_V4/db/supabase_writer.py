@@ -62,18 +62,18 @@ def insert_signal(signal: dict) -> bool:
 def insert_bar_log(log: dict) -> bool:
     return _safe_upsert(BAR_LOGS_TABLE, log, conflict_col="bar_time")
 
-def update_state(new_state: str) -> None:
-    """อัปเดต v3_system_state — เรียกหลัง INSERT v3_signal ที่ passed=True เสมอ"""
-    if DRY_RUN:
-        logger.info(f"[DRY_RUN] Would UPDATE {SYSTEM_STATE_TABLE} → {new_state}")
-        return
-    try:
-        get_supabase_client().table(SYSTEM_STATE_TABLE).update({
-            "current_position": new_state,
-            "updated_at": "now()"
-        }).eq("id", 1).execute()
-    except Exception as e:
-        logger.error(f"[DB] Failed to update state: {e}")
+# def update_state(new_state: str) -> None:
+#     """อัปเดต v3_system_state — เรียกหลัง INSERT v3_signal ที่ passed=True เสมอ"""
+#     if DRY_RUN:
+#         logger.info(f"[DRY_RUN] Would UPDATE {SYSTEM_STATE_TABLE} → {new_state}")
+#         return
+#     try:
+#         get_supabase_client().table(SYSTEM_STATE_TABLE).update({
+#             "current_position": new_state,
+#             "updated_at": "now()"
+#         }).eq("id", 1).execute()
+#     except Exception as e:
+#         logger.error(f"[DB] Failed to update state: {e}")
 
 def get_signal_by_id(signal_id: str) -> dict | None:
     if DRY_RUN:
@@ -140,18 +140,43 @@ def open_trade_from_signal(signal: dict, executed_ask: float, note: str | None =
         logger.info(f"[DRY_RUN] Would open trade from signal {signal.get('id')} @ {executed_ask}")
         return True
 
-    payload = {
-        "status": "OPEN",
-        "entry_signal_id": signal["id"],
-        "entry_bar_time": signal.get("bar_time"),
-        "entry_ask": float(executed_ask),
-        "entry_bid_at_signal": signal.get("hsh_bid_price"),
-        "entry_score": signal.get("ranker_score"),
-        "entry_note": note,
-    }
     try:
+        # ── Safety Guard: prevent duplicate OPEN trades ───────────────────
+        existing = get_open_trade()
+        if existing:
+            logger.warning(
+                f"[DB] Cannot open trade: another OPEN trade already exists "
+                f"| trade_id={existing.get('id')} "
+                f"| entry_signal_id={existing.get('entry_signal_id')}"
+            )
+            return False
+
+        if not signal.get("id"):
+            logger.error("[DB] Cannot open trade: signal has no id")
+            return False
+
+        if executed_ask <= 0:
+            logger.error(f"[DB] Cannot open trade: invalid executed_ask={executed_ask}")
+            return False
+
+        payload = {
+            "status": "OPEN",
+            "entry_signal_id": signal["id"],
+            "entry_bar_time": signal.get("bar_time"),
+            "entry_ask": float(executed_ask),
+            "entry_bid_at_signal": signal.get("hsh_bid_price"),
+            "entry_score": signal.get("ranker_score"),
+            "entry_note": note,
+            "created_at": "now()",
+            "updated_at": "now()",
+        }
+
         get_supabase_client().table(ACTIVE_TRADES_TABLE).insert(payload).execute()
+        logger.info(
+            f"[DB] ✅ OPEN trade created | signal_id={signal['id']} | entry_ask={executed_ask}"
+        )
         return True
+
     except Exception as e:
         logger.error(f"[DB] open_trade_from_signal failed: {e}")
         return False

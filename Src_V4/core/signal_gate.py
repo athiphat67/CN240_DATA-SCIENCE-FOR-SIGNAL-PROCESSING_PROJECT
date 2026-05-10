@@ -20,15 +20,15 @@ def evaluate_signal_gate(inference_result: dict, features_row: FeaturesRow) -> d
     F_SRVR = features_row["F_SRVR"]
     F_Regime = features_row["F_Regime"]
     
-    # 🔁 ใช้ F_XAU_Noise_Ratio แทน F_XAU_Spread_Norm ตามการอัปเดต Phase 2
-    F_Noise_Ratio = features_row.get("F_XAU_Noise_Ratio", features_row.get("F_XAU_Spread_Norm", 0.0))
+    # ใช้ F_XAU_Spread_Norm เป็น noise/spread gate ตาม feature ที่มีจริงใน training/live
+    F_Noise_Ratio = features_row["F_XAU_Spread_Norm"]
     
     current_state = get_current_state()
     
     # ─── Shared Gates ─────────────────────────────────────────────────────────
     base_gates = {
         "market_open": session != "Closed",
-        "noise_gate": F_Noise_Ratio < GATE_SPREAD_NORM_MAX, # เดิมคือ spread_gate
+        "noise_gate": F_Noise_Ratio < GATE_SPREAD_NORM_MAX,
     }
     
     signal_type = None

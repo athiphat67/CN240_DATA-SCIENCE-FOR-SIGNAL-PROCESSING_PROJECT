@@ -34,6 +34,11 @@ SESSION_HOURS = {
     "Afternoon" : (12*60, 18*60),   # 12:00 - 17:59 → 720-1080 นาที
     "Night"     : (18*60, 2*60),    # 18:00 - 01:59 → 1080-120 นาที [ข้ามเที่ยงคืน]
 }
+# ⚠️ Reference only:
+# ค่านี้ไม่ได้ถูกใช้ใน core/feature_engine.py
+# feature_engine.py ใช้ _SESSION_EXPECTED = {'Morning': 18, 'Afternoon': 27, 'Night': 48}
+# ซึ่ง sync กับ training script และห้ามเปลี่ยนโดยไม่ retrain model
+# ห้ามนำ SESSION_EXPECTED_BARS ไปใช้คำนวณ F_FSP / F_Remaining_Vol / F_SRVR โดยตรง
 SESSION_EXPECTED_BARS = {
     "Morning"   : 36,  # 6 ชม. × 6 แท่ง/ชม.
     "Afternoon" : 36,  # 6 ชม. × 6 แท่ง/ชม.
