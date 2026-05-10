@@ -163,7 +163,7 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     xau_ret = _safe_pct_change(df["xau_close"], df["session_id"], 1)
     usd_ret = _safe_pct_change(df["usd_close"], df["session_id"], 1)
 
-    df["F_Corr_XAU_USD"]  = xau_ret.rolling(CORR_WINDOW).corr(usd_ret)
+    df["F_Corr_XAU_USD"]  = xau_ret.rolling(CORR_WINDOW).corr(usd_ret).fillna(0)
     df["F_XAU_Mom_Short"] = _safe_pct_change(df["xau_close"], df["session_id"], 3)
     df["F_XAU_Mom_Mid"]   = _safe_pct_change(df["xau_close"], df["session_id"], 12)
     df["F_USD_Mom"]       = _safe_pct_change(df["usd_close"], df["session_id"], 6)
