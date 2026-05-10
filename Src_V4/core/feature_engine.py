@@ -267,6 +267,14 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
 
     # ── Final Cleanup & Return Latest Row ────────────────────────────────────
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # F_Corr_XAU_USD requires CORR_WINDOW=18 bars to warm up.
+    # At session open (e.g. 06:00) the rolling window hasn't filled yet → NaN.
+    # Forward-fill the last known correlation across the session boundary,
+    # then zero-fill any remaining NaN (absolute cold-start / no prior data).
+    # 0.0 is the neutral / uncorrelated baseline used by the model.
+    df["F_Corr_XAU_USD"] = df["F_Corr_XAU_USD"].ffill().fillna(0.0)
+
     df.dropna(subset=["F_Syn_Price"], inplace=True)
     if df.empty:
         raise RuntimeError("[P2] OLS Cold Start ยังไม่ครบ window")

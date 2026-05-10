@@ -53,10 +53,14 @@ VOL_WINDOW          = 144
 SPREAD_NORM_WINDOW  = 144
 
 # ─── Signal Gate Thresholds ───────────────────────────────────────────────────
-GATE_SRVR_MIN           = 0.15
-GATE_SPREAD_NORM_MAX    = 2.5
-GATE_REGIME_REQUIRED    = 1
-BUY_GATE_MODE           = os.getenv("BUY_GATE_MODE", "STRICT")  # STRICT | LIVE_RELAXED
+# GATE_SRVR_MIN           = 0.15
+# GATE_SPREAD_NORM_MAX    = 2.5
+# GATE_REGIME_REQUIRED    = 1
+# BUY_GATE_MODE           = os.getenv("BUY_GATE_MODE", "STRICT")  # STRICT | LIVE_RELAXED
+GATE_SRVR_MIN        = 0.0   # ปิด — srvr=0 เกิดจาก session ที่ยังไม่มี volume data
+GATE_SPREAD_NORM_MAX = 2.5   # คงเดิม
+GATE_REGIME_REQUIRED = 0     # ปิด — หรือใช้ LIVE_RELAXED
+BUY_GATE_MODE        = "LIVE_RELAXED"
 
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
