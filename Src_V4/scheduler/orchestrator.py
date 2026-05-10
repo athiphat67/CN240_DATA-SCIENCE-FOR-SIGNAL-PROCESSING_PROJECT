@@ -81,6 +81,36 @@ def run_signal_pipeline() -> None:
             )
             if tp_manager.is_active:
                 tp_manager.save_to_file()  # ✅ I-2: Keep highest_bid current across restarts
+
+                # ── LOG 1: Active Position Heartbeat ─────────────────────────
+                # Printed every M10 bar while HOLDING so you can glance at the
+                # terminal and instantly see where the trail and SL are sitting.
+                trading_log.info(
+                    f"[POSITION] 🟢 ACTIVE "
+                    f"| Bid: {features_row['hsh_close_bid']:,.2f} "
+                    f"| Trail: {trail_level:,.2f} "
+                    f"| SL: {tp_manager.sl_price:,.2f} "
+                    f"| Score: {inference_result['ranker_score']:.4f}"
+                )
+
+                # ── LOG 2: TP Milestone Alerts ────────────────────────────────
+                # Printed only when the TP manager reaches a meaningful milestone.
+                if tp_trigger == "BREAKEVEN_LOCK":
+                    trading_log.info(
+                        f"[TP EVENT] 🔒 Breakeven Locked! "
+                        f"Trail floored at {tp_price:,.2f} THB — downside risk removed."
+                    )
+                elif tp_trigger == "TP_UPDATED":
+                    trading_log.info(
+                        f"[TP EVENT] 📈 Trailing Stop ratcheted up to {trail_level:,.2f} THB"
+                    )
+                elif tp_trigger == "SCORE_FADE":
+                    trading_log.warning(
+                        f"[TP EVENT] ⚠️  Score Fading "
+                        f"({inference_result['ranker_score']:.4f}) — "
+                        f"Trail at {trail_level:,.2f} THB. Watch for organic exit."
+                    )
+
             if tp_trigger != "NONE":
                 notify_dynamic_tp(tp_trigger, tp_price, trail_level, inference_result["ranker_score"], features_row["F_ATR_48"])
 
@@ -162,7 +192,16 @@ def run_signal_pipeline() -> None:
 
             # 7. Reset TP Manager & end pipeline (prevent duplicate)
             tp_manager.reset()
-            trading_log.info(f"FORCED SELL executed by {tp_trigger} | Bid Price: {exit_bid_price:.2f}")
+
+            # ── LOG 3a: High-Visibility Forced Exit Banner ────────────────────
+            trading_log.warning(
+                f"\n{'='*60}\n"
+                f"  🚨 [EXIT] FORCED SELL — {tp_trigger}\n"
+                f"  Bid Price : {exit_bid_price:,.2f} THB\n"
+                f"  Score     : {inference_result['ranker_score']:.4f}\n"
+                f"  Bar Time  : {features_row['bar_time']}\n"
+                f"{'='*60}"
+            )
             return  # 🔚 end this cycle immediately
 
         # ─── P5: Build Signal Record ──────────────────────────────────────────
