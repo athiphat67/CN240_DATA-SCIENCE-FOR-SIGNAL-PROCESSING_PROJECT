@@ -1,46 +1,78 @@
 # main.py
 import logging
+
 from logger_setup import setup_logging
-from scheduler.orchestrator import start_scheduler
-from config.settings import DRY_RUN
+from scheduler.orchestrator import start_scheduler, tp_manager
+from config.settings import DRY_RUN, STATE_HOLDING
 from core.state_manager import get_current_state
 from notifier.discord_notifier import send_discord
-from scheduler.orchestrator import tp_manager
-from db.supabase_writer import get_supabase_client
 
 setup_logging()
 log = logging.getLogger("system")
 
+
 def recover_tp_state() -> None:
-    if DRY_RUN or get_current_state() != "HOLDING":
+    """
+    Restore in-memory TP manager from DB active trade on startup.
+
+    ใช้สำหรับ Manual Confirm flow:
+    - ถ้า state = HOLDING
+    - และยังมี active trade ที่ status = OPEN
+    - และ TP manager ยังไม่ active จาก tp_state.json
+    → ค่อย activate TP manager จาก active trade
+
+    หมายเหตุ:
+    orchestrator.py ของฝั่งโจมอาจ restore TP จาก tp_state.json ตอน import แล้ว
+    ดังนั้น function นี้เป็น fallback ชั้นที่ 2 เท่านั้น
+    """
+    if DRY_RUN:
         return
+
     try:
-        client = get_supabase_client()
-        res = client.table("signals").select("hsh_ask_price, hsh_bid_price, ranker_score")\
-            .eq("signal_type", "BUY").eq("passed", True).order("created_at", desc=True).limit(1).execute()
-        if res.data and not tp_manager.is_active:
-            last_buy = res.data[0]
-            tp_manager.activate(
-                entry_ask=float(last_buy["hsh_ask_price"]),
-                entry_score=float(last_buy["ranker_score"]),
-                initial_bid=float(last_buy["hsh_bid_price"])
-            )
-            log.info("[Startup] TP Manager recovered from last BUY signal")
+        current_state = get_current_state()
+        if current_state != STATE_HOLDING:
+            return
+
+        if tp_manager.is_active:
+            log.info("[Startup] TP Manager already active; DB recovery skipped")
+            return
+
+        from db.supabase_writer import get_open_trade
+
+        active_trade = get_open_trade()
+        if not active_trade:
+            log.warning("[Startup] State is HOLDING but no OPEN active trade was found")
+            return
+
+        tp_manager.activate(
+            entry_ask=float(active_trade["entry_ask"]),
+            entry_score=float(active_trade["entry_score"]),
+            initial_bid=float(active_trade.get("entry_bid_at_signal") or active_trade["entry_ask"]),
+        )
+
+        if hasattr(tp_manager, "save_to_file"):
+            tp_manager.save_to_file()
+
+        log.info("[Startup] TP Manager recovered from DB active trade")
+
     except Exception as e:
-        log.warning(f"[Startup] TP state recovery failed: {e}")
+        log.warning(f"[Startup] TP state recovery skipped: {e}")
+
 
 if __name__ == "__main__":
     log.info("=" * 60)
     log.info("HSH ML Trader v3.0 — Signal Generator Mode")
     log.info(f"DRY_RUN = {DRY_RUN}")
     log.info("=" * 60)
-    
+
     try:
         state = get_current_state()
         log.info(f"Current state on startup: {state}")
-        send_discord(f"🚀 HSH Trader v3.0 started | State: `{state}` | DRY_RUN: `{DRY_RUN}`")
+        send_discord(
+            f"🚀 HSH Trader v3.0 started | State: `{state}` | DRY_RUN: `{DRY_RUN}`"
+        )
     except Exception as e:
         log.warning(f"Startup state check failed: {e}")
 
-    recover_tp_state()  # 🆕 Restore TP state before scheduler starts
+    recover_tp_state()
     start_scheduler()
