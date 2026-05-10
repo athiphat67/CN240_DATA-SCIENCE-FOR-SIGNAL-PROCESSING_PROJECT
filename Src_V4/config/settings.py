@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── Mode ─────────────────────────────────────────────────────────────────────
-DRY_RUN     = os.getenv("DRY_RUN", "false").lower() == "false"
+DRY_RUN     = os.getenv("DRY_RUN", "false").lower() == "true"
 LOG_LEVEL   = os.getenv("LOG_LEVEL", "INFO")
 TIMEZONE    = os.getenv("TIMEZONE", "Asia/Bangkok")
 
