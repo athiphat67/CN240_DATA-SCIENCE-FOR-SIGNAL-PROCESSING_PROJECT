@@ -17,9 +17,9 @@ logger = logging.getLogger("system")
 # ไม่รวม purity factor ต่างจาก CONV_FACTOR ที่ใช้กับ F_Syn_Price
 _HIST_VOL_WEIGHT = 15.244 / 31.1035   # ≈ 0.4901
 
-# Expected session lengths ตรงกับ training script (Morning=18, Afternoon=27, Night=48)
+# Expected session lengths ตรงกับ app.py (source of truth) = Morning=36, Afternoon=36, Night=48
 # ⚠️  ห้ามเปลี่ยนค่านี้โดยไม่ retrain model — F_FSP, F_Remaining_Vol, F_SRVR ขึ้นอยู่กับค่านี้
-_SESSION_EXPECTED = {'Morning': 18, 'Afternoon': 27, 'Night': 48}
+_SESSION_EXPECTED = {'Morning': 36, 'Afternoon': 36, 'Night': 48}
 
 
 class FeaturesRow(TypedDict):
@@ -164,9 +164,9 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     usd_ret = _safe_pct_change(df["usd_close"], df["session_id"], 1)
 
     df["F_Corr_XAU_USD"]  = xau_ret.rolling(CORR_WINDOW).corr(usd_ret)
-    df["F_XAU_Mom_Short"] = _safe_pct_change(df["xau_close"], df["session_id"], 3)
-    df["F_XAU_Mom_Mid"]   = _safe_pct_change(df["xau_close"], df["session_id"], 12)
-    df["F_USD_Mom"]       = _safe_pct_change(df["usd_close"], df["session_id"], 6)
+    df["F_XAU_Mom_Short"] = _safe_pct_change(df["xau_close"], df["session_id"], 3).fillna(0)
+    df["F_XAU_Mom_Mid"]   = _safe_pct_change(df["xau_close"], df["session_id"], 12).fillna(0)
+    df["F_USD_Mom"]       = _safe_pct_change(df["usd_close"], df["session_id"], 6).fillna(0)
 
     # ATR(48) with Session Boundary Fix
     prev_close = df["xau_close"].shift(1)
@@ -179,7 +179,7 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     l_pc[crosses_boundary] = h_l[crosses_boundary]
 
     tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
-    df["F_ATR_48"] = tr.rolling(ATR_WINDOW).mean()
+    df["F_ATR_48"] = tr.rolling(ATR_WINDOW).mean().ffill().fillna(0)
 
     # Regime — EMA default adjust=True ตรงกับ training (ไม่ใส่ adjust=False)
     ema_fast = df["xau_close"].ewm(span=20).mean()
@@ -217,17 +217,20 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
         lambda x: (x - x.iloc[0]) / (x.iloc[0] + 1e-9)
     )
 
-    df["F_Mom_1bar"] = _safe_pct_change(df["hsh_close_ask"], df["session_id"], 1)
-    df["F_Mom_3bar"] = _safe_pct_change(df["hsh_close_ask"], df["session_id"], 3)
+    df["F_Mom_1bar"] = _safe_pct_change(df["hsh_close_ask"], df["session_id"], 1).fillna(0)
+    df["F_Mom_3bar"] = _safe_pct_change(df["hsh_close_ask"], df["session_id"], 3).fillna(0)
 
-    # F_SA_Drawdown_Pct — ใช้ transform ครั้งเดียว ตรงกับ training
-    df["F_SA_Drawdown_Pct"] = grp["hsh_close_ask"].transform(
-        lambda x: (x - x.expanding().max()) / (x.expanding().max() + 1e-9)
-    )
+    # F_SA_Drawdown_Pct — ใช้ apply ตรงกับ app.py BUG-6 fix (ไม่ใช้ transform)
+    def drawdown_pct(x):
+        running_max = x.expanding().max()
+        return (x - running_max) / (running_max + 1e-9)
+    dd = df.groupby("session_id")["hsh_close_ask"].apply(drawdown_pct)
+    dd.index = dd.index.droplevel(0)
+    df["F_SA_Drawdown_Pct"] = dd.reindex(df.index).fillna(0)
 
     thb_gold_ret = _safe_pct_change(df["xau_close"] * df["usd_close"], df["session_id"], 1)
     hsh_ret      = _safe_pct_change(df["hsh_close_ask"], df["session_id"], 1)
-    df["F_HSH_vs_THBGold_Dev"] = (hsh_ret - thb_gold_ret).rolling(6).mean()
+    df["F_HSH_vs_THBGold_Dev"] = (hsh_ret - thb_gold_ret).rolling(6).mean().fillna(0)
 
     df["F_DayOfWeek"]   = df.index.dayofweek
     df["F_MinuteOfDay"] = df.index.hour * 60 + df.index.minute
@@ -240,24 +243,24 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
         
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        return rsi.fillna(50)
+        return rsi.ffill().fillna(50)
 
     df["F_RSI_14"] = _calc_rsi(df["hsh_close_ask"], df["session_id"], 14)
     df["F_RSI_6"]  = _calc_rsi(df["hsh_close_ask"], df["session_id"], 6)
 
     bb_mid = df["hsh_close_ask"].rolling(20).mean()
     bb_std = df["hsh_close_ask"].rolling(20).std()
-    df["F_BB_Pos"] = (df["hsh_close_ask"] - bb_mid) / (2 * bb_std.replace(0, 1e-9))
+    df["F_BB_Pos"] = ((df["hsh_close_ask"] - bb_mid) / (2 * bb_std.replace(0, 1e-9))).fillna(0)
 
     # F_XAU_Spread_Norm — ใช้ XAU High-Low เป็น XAU_Spread ตรงกับ training
     # training: df['XAU_Spread'] / df['XAU_Spread'].rolling(VOL_WINDOW).mean().replace(0, 1e-9)
     xau_spread = (df["xau_high"] - df["xau_low"]).replace(0, np.nan).ffill().fillna(0.5)
-    df["F_XAU_Spread_Norm"] = xau_spread / xau_spread.rolling(VOL_WINDOW, min_periods=1).mean().replace(0, 1e-9)
+    df["F_XAU_Spread_Norm"] = (xau_spread / xau_spread.rolling(VOL_WINDOW, min_periods=1).mean().replace(0, 1e-9)).ffill().fillna(1)
 
     hour_dec = df.index.hour + df.index.minute / 60
     df["F_Hour_Sin"] = np.sin(2 * np.pi * hour_dec / 24)
     df["F_Hour_Cos"] = np.cos(2 * np.pi * hour_dec / 24)
-    df["F_Session_Type"] = df["session"].map({"Morning": 0, "Afternoon": 1, "Night": 2}).fillna(-1).astype(int)
+    df["F_Session_Type"] = df["session"].map({"Morning": 0, "Afternoon": 1, "Night": 2}).fillna(0).astype(int)
 
     # HSH Spread = ask - bid (เทียบเท่า HSH_Spread_Sim ใน training)
     hsh_spread = df["hsh_close_ask"] - df["hsh_close_bid"]
