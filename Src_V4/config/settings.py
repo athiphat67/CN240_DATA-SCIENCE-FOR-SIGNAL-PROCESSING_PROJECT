@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── Mode ─────────────────────────────────────────────────────────────────────
-DRY_RUN     = os.getenv("DRY_RUN", "false").lower() == "true"
+DRY_RUN     = os.getenv("DRY_RUN", "false").lower() == "false"
 LOG_LEVEL   = os.getenv("LOG_LEVEL", "INFO")
 TIMEZONE    = os.getenv("TIMEZONE", "Asia/Bangkok")
 
@@ -34,6 +34,11 @@ SESSION_HOURS = {
     "Afternoon" : (12*60, 18*60),   # 12:00 - 17:59 → 720-1080 นาที
     "Night"     : (18*60, 2*60),    # 18:00 - 01:59 → 1080-120 นาที [ข้ามเที่ยงคืน]
 }
+# ⚠️ Reference only:
+# ค่านี้ไม่ได้ถูกใช้ใน core/feature_engine.py
+# feature_engine.py ใช้ _SESSION_EXPECTED = {'Morning': 18, 'Afternoon': 27, 'Night': 48}
+# ซึ่ง sync กับ training script และห้ามเปลี่ยนโดยไม่ retrain model
+# ห้ามนำ SESSION_EXPECTED_BARS ไปใช้คำนวณ F_FSP / F_Remaining_Vol / F_SRVR โดยตรง
 SESSION_EXPECTED_BARS = {
     "Morning"   : 36,  # 6 ชม. × 6 แท่ง/ชม.
     "Afternoon" : 36,  # 6 ชม. × 6 แท่ง/ชม.
@@ -49,8 +54,9 @@ SPREAD_NORM_WINDOW  = 144
 
 # ─── Signal Gate Thresholds ───────────────────────────────────────────────────
 GATE_SRVR_MIN           = 0.15
-GATE_SPREAD_NORM_MAX    = 2.5
-GATE_REGIME_REQUIRED    = 1
+GATE_SPREAD_NORM_MAX    = 1.5
+GATE_REGIME_REQUIRED    = 0
+BUY_GATE_MODE           = os.getenv("BUY_GATE_MODE", "STRICT")  # STRICT | LIVE_RELAXED
 
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -70,3 +76,13 @@ TP_BREAKEVEN_ATR_MULT   = 1.0   # Lock trail after this profit
 TP_SCORE_DROP_THRESH    = 0.15  # Early warning threshold
 TP_SL_ATR_MULT          = 1.0   # Stop loss multiplier
 TP_BE_FLOOR_OFFSET      = 2.0   # Breakeven floor offset
+
+# ─── Execution Confirmation ──────────────────────────────────────────────────
+REQUIRE_BUY_CONFIRM = os.getenv("REQUIRE_BUY_CONFIRM", "true").lower() == "true"
+AUTO_CONFIRM_SELL   = os.getenv("AUTO_CONFIRM_SELL", "true").lower() == "true"
+
+SIGNALS_TABLE       = os.getenv("SIGNALS_TABLE", "v3_signals")
+BAR_LOGS_TABLE      = os.getenv("BAR_LOGS_TABLE", "v3_bar_logs")
+SYSTEM_STATE_TABLE  = os.getenv("SYSTEM_STATE_TABLE", "v3_system_state")
+ACTIVE_TRADES_TABLE = os.getenv("ACTIVE_TRADES_TABLE", "v3_active_trades")
+TP_SL_ATR_MULT          = 1.0   # Stop loss multiplier

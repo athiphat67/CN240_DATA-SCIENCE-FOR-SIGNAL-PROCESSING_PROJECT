@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS v3_system_state (
     updated_at          TIMESTAMPTZ DEFAULT NOW(),
     note                TEXT
 );
-INSERT INTO system_state (id, current_position) VALUES (1, 'EMPTY') ON CONFLICT (id) DO NOTHING;
+INSERT INTO v3_system_state (id, current_position) VALUES (1, 'EMPTY') ON CONFLICT (id) DO NOTHING;
 
 -- ─── Table 2: signals ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS v3_signals (
@@ -23,12 +23,45 @@ CREATE TABLE IF NOT EXISTS v3_signals (
     reject_reason   TEXT,
     dry_run         BOOLEAN NOT NULL DEFAULT false,
     features_snap   JSONB,
+    rationale_text  TEXT,
+    top_shap_features JSONB,
+    execution_status TEXT DEFAULT 'SIGNAL_ONLY',
+    confirmed_at    TIMESTAMPTZ,
+    confirmed_price NUMERIC(10,2),
+    confirm_note    TEXT,
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_signals_bar_time ON v3_signals(bar_time DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_type ON v3_signals(signal_type) WHERE passed = true;
 
--- ─── Table 3: bar_logs (Debug & Retrain) ───────────────────────────────────
+-- ─── Table 3: active trades ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS v3_active_trades (
+    id                  BIGSERIAL PRIMARY KEY,
+    status              TEXT NOT NULL DEFAULT 'OPEN', -- OPEN | CLOSED | CANCELLED
+    entry_signal_id     TEXT REFERENCES v3_signals(id),
+    entry_time          TIMESTAMPTZ DEFAULT NOW(),
+    entry_bar_time      TIMESTAMPTZ,
+    entry_ask           NUMERIC(10,2) NOT NULL,
+    entry_bid_at_signal NUMERIC(10,2),
+    entry_score         NUMERIC(10,6),
+    entry_note          TEXT,
+    exit_signal_id      TEXT REFERENCES v3_signals(id),
+    exit_time           TIMESTAMPTZ,
+    exit_bid            NUMERIC(10,2),
+    exit_score          NUMERIC(10,6),
+    exit_reason         TEXT,
+    exit_note           TEXT,
+    pnl_thb             NUMERIC(10,2),
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_active_trades_status ON v3_active_trades(status);
+CREATE INDEX IF NOT EXISTS idx_active_trades_entry_signal ON v3_active_trades(entry_signal_id);
+CREATE INDEX IF NOT EXISTS idx_active_trades_exit_signal
+ON public.v3_active_trades(exit_signal_id);
+
+-- ─── Table 4: bar_logs (Debug & Retrain) ───────────────────────────────────
 CREATE TABLE IF NOT EXISTS v3_bar_logs (
     id              BIGSERIAL PRIMARY KEY,
     bar_time        TIMESTAMPTZ NOT NULL UNIQUE,
@@ -44,3 +77,31 @@ CREATE TABLE IF NOT EXISTS v3_bar_logs (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_bar_logs_bar_time ON v3_bar_logs(bar_time DESC);
+
+ALTER TABLE public.v3_signals
+ADD COLUMN IF NOT EXISTS rationale_text TEXT,
+ADD COLUMN IF NOT EXISTS top_shap_features JSONB,
+ADD COLUMN IF NOT EXISTS execution_status TEXT DEFAULT 'SIGNAL_ONLY',
+ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS confirmed_price NUMERIC(10,2),
+ADD COLUMN IF NOT EXISTS confirm_note TEXT,
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+-- Optional but strongly recommended:
+-- enforce only one OPEN trade at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_one_open_trade
+ON public.v3_active_trades (status)
+WHERE status = 'OPEN';
+
+-- Helpful indexes for execution flow.
+CREATE INDEX IF NOT EXISTS idx_signals_execution_status
+ON public.v3_signals(execution_status);
+
+CREATE INDEX IF NOT EXISTS idx_signals_pending_buy
+ON public.v3_signals(bar_time DESC)
+WHERE signal_type = 'BUY'
+  AND passed = true
+  AND execution_status IN ('PENDING_CONFIRM', 'SIGNAL_ONLY');
+
+-- Reload Supabase/PostgREST schema cache.
+NOTIFY pgrst, 'reload schema';

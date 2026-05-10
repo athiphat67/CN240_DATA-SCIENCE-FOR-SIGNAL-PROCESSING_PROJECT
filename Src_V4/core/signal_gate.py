@@ -4,6 +4,7 @@ from config.settings import (
     SIGNAL_THRESHOLD, DRY_RUN,
     STATE_EMPTY, STATE_HOLDING,
     GATE_SRVR_MIN, GATE_SPREAD_NORM_MAX, GATE_REGIME_REQUIRED,
+    BUY_GATE_MODE,
 )
 from core.state_manager import get_current_state
 from core.feature_engine import FeaturesRow
@@ -19,15 +20,15 @@ def evaluate_signal_gate(inference_result: dict, features_row: FeaturesRow) -> d
     F_SRVR = features_row["F_SRVR"]
     F_Regime = features_row["F_Regime"]
     
-    # 🔁 ใช้ F_XAU_Noise_Ratio แทน F_XAU_Spread_Norm ตามการอัปเดต Phase 2
-    F_Noise_Ratio = features_row.get("F_XAU_Noise_Ratio", features_row.get("F_XAU_Spread_Norm", 0.0))
+    # ใช้ F_XAU_Spread_Norm เป็น noise/spread gate ตาม feature ที่มีจริงใน training/live
+    F_Noise_Ratio = features_row["F_XAU_Spread_Norm"]
     
     current_state = get_current_state()
     
     # ─── Shared Gates ─────────────────────────────────────────────────────────
     base_gates = {
         "market_open": session != "Closed",
-        "noise_gate": F_Noise_Ratio < GATE_SPREAD_NORM_MAX, # เดิมคือ spread_gate
+        "noise_gate": F_Noise_Ratio < GATE_SPREAD_NORM_MAX,
     }
     
     signal_type = None
@@ -43,8 +44,18 @@ def evaluate_signal_gate(inference_result: dict, features_row: FeaturesRow) -> d
             "srvr_gate"    : F_SRVR >= GATE_SRVR_MIN,
             "regime_gate"  : F_Regime == GATE_REGIME_REQUIRED,
         }
-        gates_detail = buy_gates
-        passed = all(buy_gates.values())
+        gates_detail = buy_gates.copy()
+        gates_detail["buy_gate_mode"] = BUY_GATE_MODE
+
+        if BUY_GATE_MODE == "LIVE_RELAXED":
+            passed = (
+                buy_gates["market_open"]
+                and buy_gates["noise_gate"]
+                and buy_gates["score_gate"]
+                and (buy_gates["srvr_gate"] or buy_gates["regime_gate"])
+            )
+        else:
+            passed = all(buy_gates.values())
         signal_type   = "BUY" if passed else "HOLD"  # 🔁 เปลี่ยน None → HOLD
         reject_reason = None if passed else next(k for k, v in buy_gates.items() if not v)
 

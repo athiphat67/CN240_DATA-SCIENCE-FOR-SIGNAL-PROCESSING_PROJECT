@@ -108,7 +108,7 @@ def build_trade_payload(
         # "Maintaining current position" is wrong when state_before = EMPTY.
         # Pass state_before from the orchestrator to get the right wording.
         _state = (state_before or "").upper()
-        if _state == "HOLDING":  # ✅ I-3: was "LONG" which never matched
+        if _state == "HOLDING":
             spread_action = "Maintaining current long position as structural edge remains intact"
         elif _state == "EMPTY":
             spread_action = "No entry taken — model confidence is below the required threshold"
