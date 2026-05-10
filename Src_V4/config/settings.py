@@ -83,3 +83,4 @@ SIGNALS_TABLE       = os.getenv("SIGNALS_TABLE", "v3_signals")
 BAR_LOGS_TABLE      = os.getenv("BAR_LOGS_TABLE", "v3_bar_logs")
 SYSTEM_STATE_TABLE  = os.getenv("SYSTEM_STATE_TABLE", "v3_system_state")
 ACTIVE_TRADES_TABLE = os.getenv("ACTIVE_TRADES_TABLE", "v3_active_trades")
+TP_SL_ATR_MULT          = 1.0   # Stop loss multiplier

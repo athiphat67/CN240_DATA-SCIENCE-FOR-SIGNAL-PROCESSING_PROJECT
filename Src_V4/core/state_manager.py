@@ -11,6 +11,7 @@ from supabase import create_client, Client
 
 logger = logging.getLogger("trading")
 _client: Client | None = None
+_dry_run_state = STATE_EMPTY
 
 
 def _get_client() -> Client:
@@ -23,8 +24,7 @@ def _get_client() -> Client:
 def get_current_state() -> str:
     """อ่านสถานะปัจจุบันจาก DB หรือ mock เป็น EMPTY ถ้า DRY_RUN"""
     if DRY_RUN:
-        return STATE_EMPTY
-
+        return _dry_run_state
     try:
         client = _get_client()
         res = (
@@ -58,6 +58,8 @@ def set_state(new_state: str) -> None:
         raise ValueError(f"[State] Invalid state: {new_state}")
 
     if DRY_RUN:
+        global _dry_run_state
+        _dry_run_state = new_state
         logger.info(f"[DRY_RUN] Would SET state → {new_state}")
         return
 
@@ -81,6 +83,8 @@ def init_state(initial: str = STATE_EMPTY) -> None:
         raise ValueError(f"[State] Invalid initial state: {initial}")
 
     if DRY_RUN:
+        global _dry_run_state
+        _dry_run_state = initial
         logger.info(f"[DRY_RUN] Would INIT state → {initial}")
         return
 

@@ -1,4 +1,5 @@
 # notifier/discord_notifier.py
+# pyrefly: ignore [missing-import]
 import httpx
 import logging
 from typing import Optional
@@ -78,15 +79,37 @@ def notify_dynamic_tp(trigger: str, price: float, trail: float, score: float, at
     mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
     
     messages = {
-        "TP_UPDATED": f"📈 TP Adjusted → `{price:,.2f}` THB\nTrail Level: `{trail:,.2f}`",
-        "BREAKEVEN_LOCK": f"🔒 Breakeven Locked\nTrail fixed at `{trail:,.2f}`. Downside risk removed.",
-        "TRAIL_HIT": f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\nPrice hit trail at `{trail:,.2f}`. Consider closing now.\nCurrent Score: `{score:.4f}`",
-        "SL_HIT": f"🛑 {mention}**STOP LOSS HIT**\nCurrent price hit SL at `{trail:,.2f}`. Exit required.\nCurrent Score: `{score:.4f}`",
-        "SCORE_FADE": f"⚠️ Momentum Fading\nScore dropped significantly (`{score:.4f}`). Trail at `{trail:,.2f}`. Consider scaling out."
+        "TP_UPDATED": (
+            f"📈 TP Adjusted → `{price:,.2f}` THB\n"
+            f"Trail Level: `{trail:,.2f}`"
+        ),
+        "BREAKEVEN_LOCK": (
+            f"🔒 Breakeven Locked\n"
+            f"Trail fixed at `{trail:,.2f}`. Downside risk removed."
+        ),
+        "TRAIL_HIT": (
+            f"🔴 {mention}**DYNAMIC EXIT TRIGGERED**\n"
+            f"Price hit trail at `{trail:,.2f}`. Consider closing now.\n"
+            f"Current Score: `{score:.4f}`"
+        ),
+        "SL_HIT": (
+            f"🛑 {mention}**STOP LOSS HIT**\n"
+            f"Price hit SL at `{price:,.2f}`. Exit required.\n"
+            f"Current Score: `{score:.4f}`"
+        ),
+        "SCORE_FADE": (
+            f"⚠️ Momentum Fading\n"
+            f"Score dropped significantly (`{score:.4f}`). "
+            f"Trail at `{trail:,.2f}`. Consider scaling out."
+        ),
     }
-    
-    body = messages.get(trigger, f"ℹ️ TP Event `{trigger}` | price={price} | trail={trail} | score={score:.4f}")
-    send_discord(f"🤖 **HSH Dynamic TP**\n{body}\nATR(48): `{atr:,.2f}`")
+
+    msg_content = messages.get(
+        trigger,
+        f"ℹ️ TP Event `{trigger}` | price={price:,.2f} | trail={trail:,.2f} | score={score:.4f}"
+    )
+    send_discord(f"🤖 **HSH Dynamic TP**\n{msg_content}\nATR(48): `{atr:,.2f}`")
+
 
 def notify_buy_confirmed(signal_id: str, price: float, note: str = "") -> None:
     mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
@@ -98,7 +121,12 @@ def notify_buy_confirmed(signal_id: str, price: float, note: str = "") -> None:
         f"{note}"
     )
 
-def notify_sell_confirmed(price: float, reason: str = "MANUAL_SELL", signal_id: str | None = None) -> None:
+
+def notify_sell_confirmed(
+    price: float,
+    reason: str = "MANUAL_SELL",
+    signal_id: str | None = None
+) -> None:
     mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
     sig_line = f"Signal ID: `{signal_id}`\n" if signal_id else ""
     send_discord(

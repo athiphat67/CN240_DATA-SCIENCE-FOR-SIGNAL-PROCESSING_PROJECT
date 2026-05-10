@@ -26,7 +26,7 @@ def build_trade_payload(
     feature_names: List[str],
     current_ask: Optional[float],
     current_bid: Optional[float],
-    state_before: Optional[str] = None,   # "LONG" | "SHORT" | "EMPTY" | None
+    state_before: Optional[str] = None,   # "HOLDING" | "EMPTY" | None
 ) -> Dict[str, Any]:
     """
     สร้าง Rationale Text เพื่อเลียนแบบ LLM ให้ XGBoost Ranker (v3.1)
@@ -109,12 +109,7 @@ def build_trade_payload(
         # Pass state_before from the orchestrator to get the right wording.
         _state = (state_before or "").upper()
         if _state == "HOLDING":
-            _state = "LONG"
-
-        if _state == "LONG":
             spread_action = "Maintaining current long position as structural edge remains intact"
-        elif _state == "SHORT":
-            spread_action = "Maintaining current short position as structural edge remains intact"
         elif _state == "EMPTY":
             spread_action = "No entry taken — model confidence is below the required threshold"
         else:

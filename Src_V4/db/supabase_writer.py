@@ -62,29 +62,55 @@ def insert_signal(signal: dict) -> bool:
 def insert_bar_log(log: dict) -> bool:
     return _safe_upsert(BAR_LOGS_TABLE, log, conflict_col="bar_time")
 
-# def update_state(new_state: str) -> None:
-#     """อัปเดต v3_system_state — เรียกหลัง INSERT v3_signal ที่ passed=True เสมอ"""
-#     if DRY_RUN:
-#         logger.info(f"[DRY_RUN] Would UPDATE {SYSTEM_STATE_TABLE} → {new_state}")
-#         return
-#     try:
-#         get_supabase_client().table(SYSTEM_STATE_TABLE).update({
-#             "current_position": new_state,
-#             "updated_at": "now()"
-#         }).eq("id", 1).execute()
-#     except Exception as e:
-#         logger.error(f"[DB] Failed to update state: {e}")
+def update_state(new_state: str) -> None:
+    """
+    อัปเดต system state table
+
+    ใช้ retry 3 ครั้ง + raise error ถ้า update ไม่สำเร็จ
+    เพื่อป้องกัน state ใน DB กับ logic หลักเพี้ยนกัน
+    """
+    if DRY_RUN:
+        logger.info(f"[DRY_RUN] Would UPDATE {SYSTEM_STATE_TABLE} → {new_state}")
+        return
+
+    for attempt in range(3):
+        try:
+            get_supabase_client().table(SYSTEM_STATE_TABLE).update({
+                "current_position": new_state,
+                "updated_at": "now()"
+            }).eq("id", 1).execute()
+
+            logger.info(f"[DB] ✅ State updated → {new_state}")
+            return
+
+        except Exception as e:
+            logger.warning(f"[DB] ⚠️ update_state attempt {attempt + 1} failed: {e}")
+            if attempt == 2:
+                logger.error(f"[DB] ❌ update_state failed after 3 attempts: {e}")
+                raise
+            time.sleep(2 ** attempt)
+
 
 def get_signal_by_id(signal_id: str) -> dict | None:
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Would fetch signal {signal_id}")
         return None
-    res = get_supabase_client().table(SIGNALS_TABLE).select("*").eq("id", signal_id).limit(1).execute()
+
+    res = (
+        get_supabase_client()
+        .table(SIGNALS_TABLE)
+        .select("*")
+        .eq("id", signal_id)
+        .limit(1)
+        .execute()
+    )
     return res.data[0] if res.data else None
+
 
 def get_latest_pending_buy_signal() -> dict | None:
     if DRY_RUN:
         return None
+
     res = (
         get_supabase_client()
         .table(SIGNALS_TABLE)
@@ -98,7 +124,13 @@ def get_latest_pending_buy_signal() -> dict | None:
     )
     return res.data[0] if res.data else None
 
-def mark_signal_execution(signal_id: str, status: str, price: float | None = None, note: str | None = None) -> bool:
+
+def mark_signal_execution(
+    signal_id: str,
+    status: str,
+    price: float | None = None,
+    note: str | None = None
+) -> bool:
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Would mark signal {signal_id} → {status}")
         return True
@@ -107,23 +139,29 @@ def mark_signal_execution(signal_id: str, status: str, price: float | None = Non
         "execution_status": status,
         "updated_at": "now()",
     }
+
     if price is not None:
         payload["confirmed_price"] = float(price)
+
     if note:
         payload["confirm_note"] = note
+
     if status in ("CONFIRMED", "AUTO_EXITED", "CANCELLED"):
         payload["confirmed_at"] = "now()"
 
     try:
         get_supabase_client().table(SIGNALS_TABLE).update(payload).eq("id", signal_id).execute()
         return True
+
     except Exception as e:
         logger.error(f"[DB] mark_signal_execution failed: {e}")
         return False
 
+
 def get_open_trade() -> dict | None:
     if DRY_RUN:
         return None
+
     res = (
         get_supabase_client()
         .table(ACTIVE_TRADES_TABLE)
@@ -135,13 +173,17 @@ def get_open_trade() -> dict | None:
     )
     return res.data[0] if res.data else None
 
-def open_trade_from_signal(signal: dict, executed_ask: float, note: str | None = None) -> bool:
+
+def open_trade_from_signal(
+    signal: dict,
+    executed_ask: float,
+    note: str | None = None
+) -> bool:
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Would open trade from signal {signal.get('id')} @ {executed_ask}")
         return True
 
     try:
-        # ── Safety Guard: prevent duplicate OPEN trades ───────────────────
         existing = get_open_trade()
         if existing:
             logger.warning(
@@ -172,6 +214,7 @@ def open_trade_from_signal(signal: dict, executed_ask: float, note: str | None =
         }
 
         get_supabase_client().table(ACTIVE_TRADES_TABLE).insert(payload).execute()
+
         logger.info(
             f"[DB] ✅ OPEN trade created | signal_id={signal['id']} | entry_ask={executed_ask}"
         )
@@ -181,7 +224,14 @@ def open_trade_from_signal(signal: dict, executed_ask: float, note: str | None =
         logger.error(f"[DB] open_trade_from_signal failed: {e}")
         return False
 
-def close_open_trade(exit_bid: float, exit_signal_id: str | None = None, exit_score: float | None = None, reason: str = "MANUAL_SELL", note: str | None = None) -> bool:
+
+def close_open_trade(
+    exit_bid: float,
+    exit_signal_id: str | None = None,
+    exit_score: float | None = None,
+    reason: str = "MANUAL_SELL",
+    note: str | None = None
+) -> bool:
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Would close open trade @ {exit_bid} | reason={reason}")
         return True
@@ -205,9 +255,14 @@ def close_open_trade(exit_bid: float, exit_signal_id: str | None = None, exit_sc
         "pnl_thb": pnl,
         "updated_at": "now()",
     }
+
     try:
         get_supabase_client().table(ACTIVE_TRADES_TABLE).update(payload).eq("id", trade["id"]).execute()
+        logger.info(
+            f"[DB] ✅ OPEN trade closed | trade_id={trade['id']} | exit_bid={exit_bid} | pnl={pnl:.2f}"
+        )
         return True
+
     except Exception as e:
         logger.error(f"[DB] close_open_trade failed: {e}")
         return False
