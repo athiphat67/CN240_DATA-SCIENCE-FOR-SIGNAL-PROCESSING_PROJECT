@@ -1,3 +1,4 @@
+import time
 import logging
 from config.settings import (
     STATE_EMPTY,
@@ -53,7 +54,12 @@ def get_current_state() -> str:
 
 
 def set_state(new_state: str) -> None:
-    """อัปเดตสถานะ → EMPTY หรือ HOLDING"""
+    """
+    อัปเดตสถานะ → EMPTY หรือ HOLDING
+
+    Single state writer for the entire system.
+    Uses 3-retry + raise on final failure to prevent silent state divergence.
+    """
     if new_state not in (STATE_EMPTY, STATE_HOLDING):
         raise ValueError(f"[State] Invalid state: {new_state}")
 
@@ -63,18 +69,23 @@ def set_state(new_state: str) -> None:
         logger.info(f"[DRY_RUN] Would SET state → {new_state}")
         return
 
-    try:
-        client = _get_client()
-        client.table(SYSTEM_STATE_TABLE).update({
-            "current_position": new_state,
-            "updated_at": "now()",
-        }).eq("id", 1).execute()
+    for attempt in range(3):
+        try:
+            client = _get_client()
+            client.table(SYSTEM_STATE_TABLE).update({
+                "current_position": new_state,
+                "updated_at": "now()",
+            }).eq("id", 1).execute()
 
-        logger.info(f"[State] Updated → {new_state}")
+            logger.info(f"[State] ✅ Updated → {new_state}")
+            return
 
-    except Exception as e:
-        logger.error(f"[State] Failed to update state in {SYSTEM_STATE_TABLE}: {e}")
-        raise
+        except Exception as e:
+            logger.warning(f"[State] ⚠️ set_state attempt {attempt + 1} failed: {e}")
+            if attempt == 2:
+                logger.error(f"[State] ❌ set_state failed after 3 attempts: {e}")
+                raise
+            time.sleep(2 ** attempt)
 
 
 def init_state(initial: str = STATE_EMPTY) -> None:

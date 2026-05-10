@@ -25,7 +25,6 @@ from core.dynamic_tp_manager import DynamicTPManager
 from db.supabase_writer import (
     insert_signal,
     insert_bar_log,
-    update_state,
     get_open_trade,
     close_open_trade,
     mark_signal_execution,
@@ -288,7 +287,6 @@ def run_signal_pipeline() -> None:
                 )
 
             # 4. Flip state after signal exists and active trade is closed.
-            update_state(STATE_EMPTY)
             set_state(STATE_EMPTY)
 
             # 5. Forced exit bar log. Forced exit always exits from HOLDING.
@@ -345,7 +343,7 @@ def run_signal_pipeline() -> None:
             signal_record["execution_status"] = "CONFIRMED"
 
         # ─── P6: Write to Supabase ────────────────────────────────────────────
-        insert_signal(signal_record)
+        ok_signal_insert = insert_signal(signal_record)
         insert_bar_log({
             "bar_time": features_row["bar_time"],
             "session": features_row["session"],
@@ -372,7 +370,18 @@ def run_signal_pipeline() -> None:
                 )
 
             elif signal_type == "SELL":
-                # Signal has already been inserted before close_open_trade, so FK is safe.
+                if not ok_signal_insert:
+                    trading_log.error(
+                        "[SELL] insert_signal failed — aborting SELL. "
+                        "State was NOT changed."
+                    )
+                    notify_error(
+                        "Model SELL",
+                        "Failed to insert SELL signal. State was NOT changed.",
+                    )
+                    return
+
+                # Signal exists in DB → FK-safe to close active trade.
                 ok_close = close_open_trade(
                     exit_signal_id=signal_record.get("id"),
                     exit_bid=gate_result["hsh_bid"],
@@ -387,7 +396,6 @@ def run_signal_pipeline() -> None:
                     )
                     return
 
-                update_state(STATE_EMPTY)
                 set_state(STATE_EMPTY)
                 tp_manager.reset()
                 notify_sell_signal(gate_result, rationale_payload)
