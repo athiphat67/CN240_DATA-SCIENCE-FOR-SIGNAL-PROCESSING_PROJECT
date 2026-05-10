@@ -126,6 +126,14 @@ def test_trigger_priority_trail_vs_score():
     trigger, _, _ = tp.update(current_bid=30000.0, atr_48=100.0, current_score=0.60)
     assert trigger == "TRAIL_HIT", f"Expected TRAIL_HIT (higher priority), got {trigger}"
 
+def test_sl_hit():
+    """Test that SL is hit when price drops below sl_price"""
+    tp = DynamicTPManager(atr_multiplier=1.5, breakeven_atr_mult=1.0, score_drop_threshold=0.15)
+    tp.activate(30000.0, 0.75, 30000.0, sl_price=29900.0)
+    trigger, price, trail = tp.update(current_bid=29800.0, atr_48=100.0, current_score=0.75)
+    assert trigger == "SL_HIT", f"Expected SL_HIT, got {trigger}"
+    assert price == 29900.0
+
 # ─── Main Runner ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 55)
@@ -143,6 +151,7 @@ if __name__ == "__main__":
         test_inactive_returns_none,
         test_invalid_atr_returns_none,
         test_trigger_priority_trail_vs_score,
+        test_sl_hit,
     ]
 
     for test in test_list:
