@@ -7,7 +7,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 from config.settings import TIMEZONE, DRY_RUN, STATE_EMPTY, STATE_HOLDING
-from config.settings import TP_ATR_MULTIPLIER, TP_BREAKEVEN_ATR_MULT, TP_SCORE_DROP_THRESH, TP_SL_ATR_MULT
+from config.settings import TP_ATR_MULTIPLIER, TP_BREAKEVEN_ATR_MULT, TP_SCORE_DROP_THRESH, TP_SL_ATR_MULT, TP_BE_FLOOR_OFFSET
 from core.candle_builder import build_candles
 from core.feature_engine import compute_features
 from core.model_inference import run_inference
@@ -30,7 +30,8 @@ _last_state    : str   = STATE_EMPTY
 tp_manager = DynamicTPManager(
     atr_multiplier=TP_ATR_MULTIPLIER,
     breakeven_atr_mult=TP_BREAKEVEN_ATR_MULT,
-    score_drop_threshold=TP_SCORE_DROP_THRESH
+    score_drop_threshold=TP_SCORE_DROP_THRESH,
+    be_floor_offset=TP_BE_FLOOR_OFFSET
 )
 
 # ✅ I-2: Restore TP state if orchestrator restarted while a position was open
@@ -163,7 +164,11 @@ def run_signal_pipeline() -> None:
             insert_signal(forced_sell_record)
 
             # 4. ✅ I-6: Flip state AFTER insert succeeds
-            update_state(STATE_EMPTY)
+            try:
+                update_state(STATE_EMPTY)
+            except Exception as e:
+                system_log.error(f"[TP] DB update_state(STATE_EMPTY) failed: {e}. Fallback to memory state.")
+                notify_error("DB State Update Failed", f"Forced exit succeeded but update_state failed: {e}")
             set_state(STATE_EMPTY)
 
             # 5. ✅ Notify Discord
@@ -235,12 +240,20 @@ def run_signal_pipeline() -> None:
         if gate_result["passed"] and gate_result["signal_type"]:
             signal_type = gate_result["signal_type"]
             if signal_type == "BUY":
-                update_state(STATE_HOLDING)
+                try:
+                    update_state(STATE_HOLDING)
+                except Exception as e:
+                    system_log.error(f"DB update_state(STATE_HOLDING) failed: {e}")
+                    notify_error("DB State Update Failed", f"BUY signal succeeded but update_state failed: {e}")
                 set_state(STATE_HOLDING)
                 notify_buy_signal(gate_result, rationale_payload)
                 trading_log.info(f"BUY signal sent | score={_last_score:.4f}")
             elif signal_type == "SELL":
-                update_state(STATE_EMPTY)
+                try:
+                    update_state(STATE_EMPTY)
+                except Exception as e:
+                    system_log.error(f"DB update_state(STATE_EMPTY) failed: {e}")
+                    notify_error("DB State Update Failed", f"SELL signal succeeded but update_state failed: {e}")
                 set_state(STATE_EMPTY)
                 tp_manager.reset()  # ✅ I-1: Clear TP state so stale trail/SL doesn’t fire on next bar
                 notify_sell_signal(gate_result, rationale_payload)

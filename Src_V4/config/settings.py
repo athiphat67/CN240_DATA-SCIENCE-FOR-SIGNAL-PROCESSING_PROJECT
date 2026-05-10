@@ -69,3 +69,4 @@ TP_ATR_MULTIPLIER       = 1.5   # Trail distance
 TP_BREAKEVEN_ATR_MULT   = 1.0   # Lock trail after this profit
 TP_SCORE_DROP_THRESH    = 0.15  # Early warning threshold
 TP_SL_ATR_MULT          = 1.0   # Stop loss multiplier
+TP_BE_FLOOR_OFFSET      = 2.0   # Breakeven floor offset

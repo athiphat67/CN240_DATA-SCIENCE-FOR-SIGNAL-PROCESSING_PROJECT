@@ -1,6 +1,7 @@
 from typing import Optional, Tuple
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger("trading")
@@ -12,11 +13,13 @@ class DynamicTPManager:
         self,
         atr_multiplier: float = 1.5,
         breakeven_atr_mult: float = 1.0,
-        score_drop_threshold: float = 0.15
+        score_drop_threshold: float = 0.15,
+        be_floor_offset: float = 2.0
     ):
         self.atr_mult = atr_multiplier
         self.be_mult = breakeven_atr_mult
         self.score_drop_thresh = score_drop_threshold
+        self.be_floor_offset = be_floor_offset
         
         self.is_active = False
         self.entry_ask: Optional[float] = None
@@ -64,10 +67,10 @@ class DynamicTPManager:
         raw_trail = self.highest_bid - (atr_48 * self.atr_mult)
         
         # The price target to trigger breakeven lock
-        be_trigger_price = self.entry_ask + max(2.0, atr_48 * self.be_mult)
+        be_trigger_price = self.entry_ask + max(self.be_floor_offset, atr_48 * self.be_mult)
         
         # Floor for the trail once breakeven is locked
-        be_floor = self.entry_ask + 2.0 
+        be_floor = self.entry_ask + max(self.be_floor_offset, atr_48 * self.be_mult) 
         
         just_locked = False
         if not self._breakeven_locked and self.highest_bid >= be_trigger_price:
@@ -76,14 +79,14 @@ class DynamicTPManager:
             
         active_trail = max(raw_trail, be_floor) if self._breakeven_locked else raw_trail
 
-        # 🔴 Priority 2: Trail Hit
-        if current_bid <= active_trail:
-            return "TRAIL_HIT", active_trail, active_trail
-
-        # 🔒 Priority 3: Breakeven Lock
+        # 🔒 Priority 2: Breakeven Lock
         # Fire once when highest_bid reaches the trigger price
         if just_locked:
             return "BREAKEVEN_LOCK", be_floor, active_trail
+
+        # 🔴 Priority 3: Trail Hit
+        if current_bid <= active_trail:
+            return "TRAIL_HIT", active_trail, active_trail
 
         # ⚠️ Priority 4: Score Fade
         if self.entry_score is not None and (self.entry_score - current_score) >= self.score_drop_thresh:
@@ -108,7 +111,9 @@ class DynamicTPManager:
     def save_to_file(self, path: str = _TP_STATE_FILE) -> None:
         """Persist TP state to disk so it survives an orchestrator restart."""
         try:
-            Path(path).write_text(json.dumps(self.to_dict()), encoding="utf-8")
+            temp_path = f"{path}.tmp"
+            Path(temp_path).write_text(json.dumps(self.to_dict()), encoding="utf-8")
+            os.replace(temp_path, path)
             logger.debug(f"[TP] State saved → {path}")
         except Exception as e:
             logger.warning(f"[TP] Failed to save state: {e}")
