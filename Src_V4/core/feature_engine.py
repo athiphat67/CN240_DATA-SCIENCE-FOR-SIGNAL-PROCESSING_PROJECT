@@ -1,6 +1,7 @@
 # core/feature_engine.py
 # ⚠️  ซิงค์กับ 02_feature_engineering.py (training script) — ห้ามแก้สูตรโดยไม่อัปเดต training ด้วย
 import pandas as pd
+# pyrefly: ignore [missing-import]
 import numpy as np
 import logging
 from typing import TypedDict
@@ -234,9 +235,12 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     # ── Group 4: Technical ────────────────────────────────────────────────────
     def _calc_rsi(series, session_series, period):
         delta = _safe_diff(series, session_series, 1)
-        gain  = delta.where(delta > 0, 0).rolling(period).mean()
-        loss  = (-delta.where(delta < 0, 0)).rolling(period).mean()
-        return 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+        gain  = delta.where(delta > 0, 0.0).rolling(period).mean()
+        loss  = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+        
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50)
 
     df["F_RSI_14"] = _calc_rsi(df["hsh_close_ask"], df["session_id"], 14)
     df["F_RSI_6"]  = _calc_rsi(df["hsh_close_ask"], df["session_id"], 6)

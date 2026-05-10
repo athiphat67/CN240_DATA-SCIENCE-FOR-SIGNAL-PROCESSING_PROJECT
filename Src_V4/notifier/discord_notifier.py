@@ -1,4 +1,5 @@
 # notifier/discord_notifier.py
+# pyrefly: ignore [missing-import]
 import httpx
 import logging
 from typing import Optional

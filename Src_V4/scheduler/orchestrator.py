@@ -33,6 +33,11 @@ tp_manager = DynamicTPManager(
     score_drop_threshold=TP_SCORE_DROP_THRESH
 )
 
+# ✅ I-2: Restore TP state if orchestrator restarted while a position was open
+_tp_restored = tp_manager.restore_from_file()
+if _tp_restored:
+    system_log.info("[TP] ✅ TP state recovered from disk — restart protection active.")
+
 def run_signal_pipeline() -> None:
     global _last_bar_time, _last_score, _last_state
     now = datetime.now(TZ)
@@ -62,6 +67,7 @@ def run_signal_pipeline() -> None:
                     sl_price=sl_price
                 )
                 just_activated = True
+                tp_manager.save_to_file()  # ✅ I-2: Persist entry state for restart recovery
             elif gate_result["signal_type"] == "SELL":
                 tp_manager.reset()
 
@@ -73,6 +79,8 @@ def run_signal_pipeline() -> None:
                 atr_48=features_row["F_ATR_48"],
                 current_score=inference_result["ranker_score"]
             )
+            if tp_manager.is_active:
+                tp_manager.save_to_file()  # ✅ I-2: Keep highest_bid current across restarts
             if tp_trigger != "NONE":
                 notify_dynamic_tp(tp_trigger, tp_price, trail_level, inference_result["ranker_score"], features_row["F_ATR_48"])
 
@@ -82,14 +90,7 @@ def run_signal_pipeline() -> None:
             exit_bid_price = features_row["hsh_close_bid"]  # ✅ ใช้ Bid Price เป็นจุดออก
             system_log.info(f"[TP] {reason_text} @ {exit_bid_price:.2f}. Forcing SELL signal.")
 
-            # 1. Override State → EMPTY
-            update_state(STATE_EMPTY)
-            set_state(STATE_EMPTY)
-
-            # 2. ✅ Build rationale FIRST using bearish SELL template
-            # so the DB record and Discord notification both contain rationale.
-            # The SHAP bearish drivers describe WHY the position lost momentum,
-            # then we prepend the explicit auto-exit trigger reason on top.
+            # 1. ✅ Build rationale FIRST (SHAP bearish drivers + auto-exit prefix)
             rationale_payload = build_trade_payload(
                 signal_type   = "SELL",
                 ranker_score  = inference_result["ranker_score"],
@@ -97,15 +98,15 @@ def run_signal_pipeline() -> None:
                 feature_names = inference_result.get("feature_names", []),
                 current_ask   = features_row["hsh_close_ask"],
                 current_bid   = exit_bid_price,
+                state_before  = "HOLDING",
             )
-            # 3. ✅ ใช้ Template Rationale เดิม + เติมเหตุผล Auto-Exit
             rationale_payload["rationale_text"] = (
                 f"🤖 **Auto-Exit Trigger:** {reason_text} @ `{exit_bid_price:,.2f}` THB\n\n"
                 f"{rationale_payload.get('rationale_text', '')}"
             )
             rationale_payload["execution_price"] = exit_bid_price
 
-            # 3. ✅ Assemble DB record WITH rationale — insert AFTER payload is ready
+            # 2. ✅ Assemble DB record
             forced_signal_id = f"tp_{features_row['bar_time'][:19].replace('-','').replace(':','').replace('T','_')}_{uuid.uuid4().hex[:6]}"
             forced_sell_record = {
                 "id"                : forced_signal_id,
@@ -126,9 +127,16 @@ def run_signal_pipeline() -> None:
                 "top_shap_features" : rationale_payload.get("top_shap_features", {}),
                 "created_at"        : datetime.now(TZ).isoformat(),
             }
+
+            # 3. ✅ I-6: INSERT signal BEFORE flipping state
+            #    (so DB record exists even if state update later fails)
             insert_signal(forced_sell_record)
 
-            # 4. ✅ Notify Discord using notify_sell_signal — same template as normal SELL
+            # 4. ✅ I-6: Flip state AFTER insert succeeds
+            update_state(STATE_EMPTY)
+            set_state(STATE_EMPTY)
+
+            # 5. ✅ Notify Discord
             forced_gate_result = {
                 "bar_time"      : features_row["bar_time"],
                 "session"       : features_row["session"],
@@ -138,10 +146,24 @@ def run_signal_pipeline() -> None:
             }
             notify_sell_signal(forced_gate_result, rationale_payload)
 
-            # 5. Reset TP Manager & จบ Pipeline (กัน Duplicate)
+            # 6. ✅ I-5: Hardcode state_at_bar="HOLDING" — forced exit ALWAYS exits from HOLDING
+            insert_bar_log({
+                "bar_time"      : features_row["bar_time"],
+                "session"       : features_row["session"],
+                "state_at_bar"  : "HOLDING",
+                "ranker_score"  : inference_result["ranker_score"],
+                "signal_passed" : True,
+                "signal_type"   : "SELL",
+                "hsh_close_ask" : features_row["hsh_close_ask"],
+                "hsh_close_bid" : exit_bid_price,
+                "atr_48"        : features_row["F_ATR_48"],
+                "features_snap" : inference_result["features_snap"],
+            })
+
+            # 7. Reset TP Manager & end pipeline (prevent duplicate)
             tp_manager.reset()
             trading_log.info(f"FORCED SELL executed by {tp_trigger} | Bid Price: {exit_bid_price:.2f}")
-            return  # 🔚 จบรอบนี้ทันที
+            return  # 🔚 end this cycle immediately
 
         # ─── P5: Build Signal Record ──────────────────────────────────────────
         rationale_payload = build_trade_payload(
@@ -151,6 +173,7 @@ def run_signal_pipeline() -> None:
             feature_names = inference_result.get("feature_names", []),
             current_ask   = gate_result["hsh_ask"],
             current_bid   = gate_result["hsh_bid"],
+            state_before  = gate_result["state_before"],
         )
         signal_record = build_signal_record(gate_result, rationale_payload)
 
@@ -180,6 +203,7 @@ def run_signal_pipeline() -> None:
             elif signal_type == "SELL":
                 update_state(STATE_EMPTY)
                 set_state(STATE_EMPTY)
+                tp_manager.reset()  # ✅ I-1: Clear TP state so stale trail/SL doesn’t fire on next bar
                 notify_sell_signal(gate_result, rationale_payload)
                 trading_log.info(f"SELL signal sent | score={_last_score:.4f}")
         else:

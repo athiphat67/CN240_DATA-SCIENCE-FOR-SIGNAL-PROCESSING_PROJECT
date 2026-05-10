@@ -59,14 +59,25 @@ def insert_bar_log(log: dict) -> None:
     _safe_upsert("v3_bar_logs", log, conflict_col="bar_time")
 
 def update_state(new_state: str) -> None:
-    """อัปเดต v3_system_state — เรียกหลัง INSERT v3_signal ที่ passed=True เสมอ"""
+    """
+    อัปเดต v3_system_state — เรียกหลัง INSERT v3_signal ที่ passed=True เสมอ
+    ✅ I-4: Retries 3x with backoff and re-raises on final failure to prevent
+    silent DB/cache state divergence.
+    """
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Would UPDATE v3_system_state → {new_state}")
         return
-    try:
-        get_supabase_client().table("v3_system_state").update({
-            "current_position": new_state,
-            "updated_at": "now()"
-        }).eq("id", 1).execute()
-    except Exception as e:
-        logger.error(f"[DB] Failed to update state: {e}")
+    for attempt in range(3):
+        try:
+            get_supabase_client().table("v3_system_state").update({
+                "current_position": new_state,
+                "updated_at": "now()"
+            }).eq("id", 1).execute()
+            logger.info(f"[DB] ✅ State updated → {new_state}")
+            return
+        except Exception as e:
+            logger.warning(f"[DB] ⚠️ update_state attempt {attempt+1} failed: {e}")
+            if attempt == 2:
+                logger.error(f"[DB] ❌ update_state failed after 3 attempts: {e}")
+                raise  # ✅ Propagate so caller knows state was NOT persisted
+            time.sleep(2 ** attempt)
