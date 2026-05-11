@@ -105,8 +105,52 @@ def fetch_dashboard():
 # Trade Actions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _create_manual_buy_signal(price: float) -> dict:
+    """
+    สร้าง manual BUY signal row ใน v3_signals
+    ใช้เมื่อไม่มี PENDING signal จาก model — เช่น ซื้อเองนอกสัญญาณ
+    คืน signal dict ที่ insert แล้ว หรือ raise Exception ถ้าล้มเหลว
+    """
+    now_str = datetime.now(TZ_BKK).strftime("%Y%m%d_%H%M%S")
+    signal_id = f"manual_buy_{now_str}"
+
+    manual_buy_record = {
+        "id": signal_id,
+        "bar_time": datetime.now(TZ_BKK).isoformat(),
+        "session": "Manual",
+        "signal_type": "BUY",
+        "ranker_score": 0.0,
+        "state_before": STATE_EMPTY,
+        "hsh_ask_price": price,
+        "hsh_bid_price": None,
+        "xau_price": None,
+        "atr_at_signal": None,
+        "passed": True,
+        "reject_reason": None,
+        "dry_run": False,
+        "features_snap": {},
+        "rationale_text": "Manual BUY — entered outside model signal",
+        "top_shap_features": {},
+        "execution_status": "CONFIRMED",
+        "confirmed_price": price,
+        "confirmed_at": datetime.now(TZ_BKK).isoformat(),
+        "created_at": datetime.now(TZ_BKK).isoformat(),
+    }
+
+    ok = insert_signal(manual_buy_record)
+    if not ok:
+        raise RuntimeError(f"Failed to insert manual BUY signal {signal_id}")
+
+    return manual_buy_record
+
+
 def confirm_buy(price_str: str, signal_id: str):
-    """ยืนยัน BUY → State: HOLDING"""
+    """
+    ยืนยัน BUY → State: HOLDING
+    รองรับ 2 กรณี:
+      A) มี PENDING signal จาก model  → ใช้ signal นั้น (เดิม)
+      B) ไม่มี signal / ซื้อเองมือ    → สร้าง manual signal แล้วเปิด trade
+    """
     try:
         if not price_str.strip():
             return "❌ กรุณากรอกราคาที่ Execute จริง"
@@ -119,63 +163,59 @@ def confirm_buy(price_str: str, signal_id: str):
         if current == STATE_HOLDING:
             return "⚠️ State เป็น HOLDING อยู่แล้ว — ไม่ต้องทำอะไร"
 
+        is_manual = False
+
+        # ── หา signal ที่จะใช้ ────────────────────────────────────────────
         if not signal_id or signal_id == "-":
             s = get_latest_pending_buy_signal()
             if not s:
-                return "❌ ไม่พบ PENDING BUY ให้ Confirm"
-            signal_id = s["id"]
+                # ไม่มี pending signal → สร้าง manual signal แทน
+                s = _create_manual_buy_signal(price)
+                is_manual = True
         else:
             s = get_signal_by_id(signal_id)
             if not s:
                 return f"❌ ไม่พบ Signal ID: {signal_id}"
 
-        # ── Validate BUY signal before opening trade ─────────────────────
-        if s.get("signal_type") != "BUY":
-            return "❌ This signal is not a BUY signal."
+        # ── Validate (เฉพาะ signal จาก model เท่านั้น ไม่ validate manual) ──
+        if not is_manual:
+            if s.get("signal_type") != "BUY":
+                return "❌ This signal is not a BUY signal."
+            if not s.get("passed"):
+                return "❌ This BUY signal did not pass the gate."
+            execution_status = s.get("execution_status")
+            if execution_status not in ("PENDING_CONFIRM", "SIGNAL_ONLY", None):
+                return f"❌ This signal is not pending anymore. Current status: {execution_status}"
+            if s.get("state_before") != STATE_EMPTY:
+                return f"❌ Invalid signal state_before: {s.get('state_before')}. Expected EMPTY."
 
-        if not s.get("passed"):
-            return "❌ This BUY signal did not pass the gate."
-
-        execution_status = s.get("execution_status")
-        if execution_status not in ("PENDING_CONFIRM", "SIGNAL_ONLY", None):
-            return f"❌ This signal is not pending anymore. Current status: {execution_status}"
-
-        if s.get("state_before") != STATE_EMPTY:
-            return f"❌ Invalid signal state_before: {s.get('state_before')}. Expected EMPTY."
-
+        # ── เปิด active trade ──────────────────────────────────────────────
         ok_trade = open_trade_from_signal(s, price)
         if not ok_trade:
             return "❌ Failed to open active trade. State was NOT changed."
 
-        ok_mark = mark_signal_execution(signal_id, "CONFIRMED", price)
-        if not ok_mark:
-            # Trade เปิดใน v3_active_trades แล้ว
-            # ดังนั้น state ต้องเป็น HOLDING ให้ตรงกับ DB จริง
-            logger.warning(
-                f"[UI] mark_signal_execution failed but trade is OPEN — "
-                f"forcing state to HOLDING | signal_id={signal_id}"
-            )
+        # ── mark signal (ถ้าไม่ใช่ manual ที่ CONFIRMED ไปแล้ว) ───────────
+        if not is_manual:
+            ok_mark = mark_signal_execution(s["id"], "CONFIRMED", price)
+            if not ok_mark:
+                logger.warning(
+                    f"[UI] mark_signal_execution failed but trade is OPEN — "
+                    f"forcing state to HOLDING | signal_id={s['id']}"
+                )
+                set_state(STATE_HOLDING)
+                notify_buy_confirmed(s["id"], price, note="⚠️ mark_signal failed — state forced to HOLDING")
+                now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
+                return (
+                    f"⚠️ Trade opened @ {price:,.2f} THB แต่ mark signal ไม่สำเร็จ | "
+                    f"State → HOLDING แล้ว | กรุณาตรวจสอบ v3_signals ใน Supabase | {now_str}"
+                )
 
-            set_state(STATE_HOLDING)
-            notify_buy_confirmed(
-                signal_id,
-                price,
-                note="⚠️ mark_signal failed — state forced to HOLDING"
-            )
-
-            now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
-            return (
-                f"⚠️ Trade opened @ {price:,.2f} THB แต่ mark signal ไม่สำเร็จ | "
-                f"State → HOLDING แล้ว | กรุณาตรวจสอบ v3_signals ใน Supabase | {now_str}"
-            )
-
-        # update_state(STATE_HOLDING)
         set_state(STATE_HOLDING)
-        #send_trade_log("BUY", price, "MANUAL_BUY_CONFIRMED")
-        notify_buy_confirmed(signal_id, price)
+        notify_buy_confirmed(s["id"], price)
 
         now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
-        return f"✅ BUY Confirmed! | ราคา {price:,.2f} THB | State → HOLDING | {now_str}"
+        mode_label = "Manual (no signal)" if is_manual else "Signal Confirmed"
+        return f"✅ BUY Confirmed! [{mode_label}] | ราคา {price:,.2f} THB | State → HOLDING | {now_str}"
 
     except ValueError:
         return "❌ ราคาไม่ถูกต้อง — กรอกตัวเลขเท่านั้น"
