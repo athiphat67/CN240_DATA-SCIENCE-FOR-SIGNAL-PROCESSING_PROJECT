@@ -49,8 +49,17 @@ _STUB_MODULES = [
     "supabase",
     "xgboost",
     "dotenv",
-    "pandas", "numpy", "numpy.lib", "numpy.lib.stride_tricks",
 ]
+
+# Only stub pandas/numpy if they're not actually installed
+try:
+    import pandas  # noqa: F401
+except ImportError:
+    _STUB_MODULES.extend(["pandas"])
+try:
+    import numpy  # noqa: F401
+except ImportError:
+    _STUB_MODULES.extend(["numpy", "numpy.lib", "numpy.lib.stride_tricks"])
 
 for mod_name in _STUB_MODULES:
     if mod_name not in sys.modules:
