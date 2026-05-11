@@ -110,13 +110,17 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
         entry_score = float(active_trade["entry_score"])
         initial_bid = float(active_trade.get("entry_bid_at_signal") or entry_ask)
 
-        atr_48 = None
-        if features_row:
-            atr_48 = features_row.get("F_ATR_48")
+        atr_thb = 0.0
+        if features_row and features_row.get("F_ATR_48"):
+            # Convert USD ATR to THB ATR
+            # F_ATR_48 is in USD/oz. Formula: USD_ATR * (15.244 / 31.1035) * USD_THB_Rate
+            atr_48 = float(features_row["F_ATR_48"])
+            usd_close = float(features_row.get("usd_close", 32.4))
+            atr_thb = atr_48 * (15.244 / 31.1035) * usd_close
 
         sl_price = None
-        if atr_48 and float(atr_48) > 0:
-            sl_price = entry_ask - (float(atr_48) * TP_SL_ATR_MULT)
+        if atr_thb > 0:
+            sl_price = entry_ask - (atr_thb * TP_SL_ATR_MULT)
 
         tp_manager.activate(
             entry_ask=entry_ask,
@@ -157,9 +161,14 @@ def run_signal_pipeline() -> None:
         tp_trigger, tp_price, trail_level = "NONE", None, 0.0
 
         if current_state == STATE_HOLDING and tp_manager.is_active:
+            # Convert USD ATR to THB ATR before passing to TP manager
+            atr_48 = float(features_row.get("F_ATR_48", 0.0))
+            usd_close = float(features_row.get("usd_close", 32.4))
+            atr_thb = atr_48 * (15.244 / 31.1035) * usd_close if atr_48 > 0 else 0.0
+
             tp_trigger, tp_price, trail_level = tp_manager.update(
                 current_bid=features_row["hsh_close_bid"],
-                atr_48=features_row["F_ATR_48"],
+                atr_48=atr_thb,
                 current_score=inference_result["ranker_score"],
             )
             _save_tp_state_if_supported()
