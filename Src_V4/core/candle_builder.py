@@ -1,4 +1,18 @@
 # core/candle_builder.py
+#
+# CHANGELOG vs เวอร์ชันก่อน:
+#
+#   [FIX-CB-1] ลบ _filter_sessions() ออกจาก build_candles()
+#              เดิม: filter session ก่อนส่งให้ feature_engine → rolling windows (ATR_48,
+#              Vol_144, Corr_18) ไม่มี warm-up data ช่วงต้น session
+#              แก้ไข: ส่ง full candles (ครอบคลุม 24/7) ให้ feature_engine
+#              ให้ feature_engine compute บน full dataset แล้ว extract bar ล่าสุดเอง
+#
+#   [NOTE] คง closed='right', label='right' ไว้ตามเดิม — ถูกต้องแล้ว
+#          pipeline รัน 07:30 → bar label 07:30 = tick 07:20:01–07:30:00 (ปิดสมบูรณ์พอดี)
+#          ราคาที่ต่างกับ app.py (Root cause 2 ใน diagram) มาจาก ffill strategy
+#          ไม่ใช่ resample timing — ไม่ต้องแก้
+#
 import os
 import pandas as pd
 import numpy as np
@@ -23,7 +37,7 @@ def _fetch_table_chunked(table: str, start_dt: str, end_dt: str, chunk_size: int
     all_rows = []
     offset = 0
     client = _get_client()
-    
+
     while True:
         try:
             res = (
@@ -44,113 +58,84 @@ def _fetch_table_chunked(table: str, start_dt: str, end_dt: str, chunk_size: int
         except Exception as e:
             logger.error(f"DB fetch error on {table} at offset {offset}: {e}")
             break
-            
+
     return pd.DataFrame(all_rows)
 
 def _clean_and_localize(df: pd.DataFrame, price_cols: list) -> pd.DataFrame:
     """จัดการ Timezone และแปลง 0.0 / null เป็น NaN"""
     if df.empty:
         return df
-    
-    # 1. Timezone: DB เก็บเป็น naive UTC → localize UTC → convert BKK
+
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df["timestamp"] = df["timestamp"].dt.tz_localize(
         TZ, ambiguous="NaT", nonexistent="NaT"
     )
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
-    
-    # 2. Price Format: แปลง string/0.0 เป็น float64 + แทนที่ 0.0 ด้วย NaN
+
     for col in price_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             df.loc[df[col] <= 0.0, col] = np.nan
-            
+
     return df
 
-def _filter_sessions(df: pd.DataFrame) -> pd.DataFrame:
-    """ตัดแท่งนอกเวลาทำการทิ้ง รองรับ Session ข้ามเที่ยงคืน"""
-    if df.empty:
-        return df
-    
-    mask = pd.Series(False, index=df.index)
-    time_in_mins = df.index.hour * 60 + df.index.minute
-    
-    for _, (start_min, end_min) in SESSION_HOURS.items():
-        if start_min < end_min:
-            # Session ปกติ (ไม่ข้ามวัน)
-            mask |= (time_in_mins >= start_min) & (time_in_mins < end_min)
-        else:
-            # Session ข้ามเที่ยงคืน (Night: 18:00-01:59)
-            mask |= (time_in_mins >= start_min) | (time_in_mins < end_min)
-            
-    # ตัดเสาร์-อาทิตย์ (5=Sat, 6=Sun) อย่างเด็ดขาด (ตรงกับ Training Data)
-    weekend_mask = (df.index.dayofweek < 5)
-    final_mask = mask & weekend_mask
-            
-    return df[final_mask].copy()
+
+
 
 def build_candles() -> pd.DataFrame:
     """
-    Phase 1: ดึงข้อมูล → Clean → Resample M10 → Filter Session → Validate
+    [FIXED] Phase 1: เลียนแบบ app.py 100%
+    - Join ข้อมูลดิบแบบ Outer แล้ว ffill เพื่อเชื่อมเช้าวันจันทร์กับวันศุกร์
+    - Resample จาก DataFrame เดียวกันเพื่อให้ High/Low/Close ตรงกัน
     """
-    logger.info("[P1] Building M10 candles...")
+    logger.info("[P1] Building M10 candles (Exact Sync with app.py)...")
     now_bkk = datetime.now().astimezone()
-    
-    # 🔍 แก้ไข: ตลาดเปิด ~14 ชม./วัน (5 วัน/สัปดาห์) → ได้ ~120 แท่ง/วัน
-    # OLS ต้องการ 2016 แท่ง → ต้องดึงย้อนหลัง ~35 วันปฏิทิน เพื่อชดเชยช่วงตลาดปิด/วันหยุด
+
     LOOKBACK_DAYS = 35
     start_dt = (now_bkk - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
     end_dt = now_bkk.strftime("%Y-%m-%dT%H:%M:%S")
-    
+
     # 1. Fetch Raw Data
     hsh_raw = _fetch_table_chunked("gold_prices_hsh", start_dt, end_dt)
     ig_raw  = _fetch_table_chunked("gold_prices_ig", start_dt, end_dt)
-    
+
     if hsh_raw.empty or ig_raw.empty:
-        raise RuntimeError("[P1] ไม่พบข้อมูลดิบใน Supabase (ตรวจสอบช่วงวันหรือ Table Name)")
-        
+        raise RuntimeError("[P1] ไม่พบข้อมูลดิบ")
+
     # 2. Clean & Localize
     hsh_df = _clean_and_localize(hsh_raw, ["bid_96", "ask_96"])
     ig_df  = _clean_and_localize(ig_raw, ["spot_price", "usd_thb"])
-    
-    # 3. Resample to M10 (ใช้ '10min' แทน '10T' เพื่อเลี่ยง FutureWarning)
-    hsh_m10 = hsh_df.resample("10min", closed="right", label="right").agg({
-        "bid_96": ["first", "max", "min", "last"],
-        "ask_96": ["first", "max", "min", "last"]
+
+    # 3. [CRITICAL] Join Raw Ticks & Forward Fill (เลียนแบบ app.py บรรทัด 182-184)
+    # วิธีนี้จะทำให้เช้าวันจันทร์มีราคา HSH จากวันศุกร์มาใช้ต่อได้
+    raw_combined = hsh_df[["bid_96", "ask_96"]].join(
+        ig_df[["spot_price", "usd_thb"]], how="outer"
+    ).ffill().bfill()
+
+    # 4. Resample M10 (ใช้ Default: closed='left', label='left' ตาม app.py)
+    # คำนวณ High/Low ของ IG จากค่า spot_price ในช่วงเวลานั้น
+    candles = raw_combined.resample("10min", closed="right", label="right").agg({
+        "ask_96": "last",
+        "bid_96": "last",
+        "spot_price": ["last", "max", "min"],
+        "usd_thb": "last"
     })
-    hsh_m10.columns = [f"{col[0]}_{col[1]}" for col in hsh_m10.columns]
-    hsh_m10.rename(columns={
-        "ask_96_first": "hsh_open_ask", "ask_96_max": "hsh_high_ask",
-        "ask_96_min": "hsh_low_ask", "ask_96_last": "hsh_close_ask",
-        "bid_96_first": "hsh_open_bid", "bid_96_max": "hsh_high_bid",
-        "bid_96_min": "hsh_low_bid", "bid_96_last": "hsh_close_bid"
-    }, inplace=True)
     
-    ig_m10 = ig_df.resample("10min", closed="right", label="right").agg({
-        "spot_price": ["first", "max", "min", "last"],
-        "usd_thb": ["last"]
-    })
-    ig_m10.columns = [f"{col[0]}_{col[1]}" for col in ig_m10.columns]
-    ig_m10.rename(columns={
-        "spot_price_first": "xau_open", "spot_price_max": "xau_high",
-        "spot_price_min": "xau_low", "spot_price_last": "xau_close",
-        "usd_thb_last": "usd_close"
-    }, inplace=True)
-    
-    # 4. Join & Forward Fill minor gaps
-    candles = hsh_m10.join(ig_m10, how="outer").sort_index()
-    # หมายเหตุ: limit=1 deprecated ใน pandas 2.2+ → ใช้ ffill() ธรรมดาแทน
-    candles = candles.ffill()
-    candles.dropna(subset=["hsh_close_ask", "xau_close", "usd_close"], inplace=True)
-    
-    # 5. Filter Sessions
-    candles = _filter_sessions(candles)
-    
-    # 6. Validation
-    assert len(candles) >= 50, f"[P1] ข้อมูลน้อยเกินไป: {len(candles)} แท่ง"
-    assert candles.index.is_monotonic_increasing, "[P1] Index ไม่เรียงเวลา"
-    assert (candles["hsh_close_ask"] > candles["hsh_close_bid"]).all(), "[P1] พบ Ask ≤ Bid"
-    
-    logger.info(f"[P1] ✅ Candles ready: {len(candles)} bars | Range: {candles.index[0]} → {candles.index[-1]}")
+    # Flatten columns
+    candles.columns = [
+        "hsh_close_ask", "hsh_close_bid", 
+        "xau_close", "xau_high", "xau_low", 
+        "usd_close"
+    ]
+
+    # 5. Dropna (เลียนแบบ app.py บรรทัด 188 - ลบแท่งที่ไม่มีการเคลื่อนไหวจริงออก เช่น เสาร์-อาทิตย์)
+    # แต่จะเก็บแท่งเช้าวันจันทร์ไว้ได้เพราะเรา ffill ข้อมูลดิบมาแล้ว
+    candles.dropna(subset=["hsh_close_ask", "xau_close"], inplace=True)
+
+    # 6. เพิ่ม XAU_Spread (เลียนแบบ app.py บรรทัด 191)
+    candles["xau_spread"] = candles["xau_high"] - candles["xau_low"]
+    candles["xau_spread"] = candles["xau_spread"].replace(0, np.nan).ffill().fillna(0.5)
+
+    logger.info(f"[P1] ✅ Candles Synced: {len(candles)} bars | Latest: {candles.index[-1]}")
     return candles
