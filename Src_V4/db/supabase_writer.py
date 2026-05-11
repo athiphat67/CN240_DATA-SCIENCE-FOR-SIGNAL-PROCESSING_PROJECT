@@ -2,6 +2,7 @@
 import json
 import time
 import logging
+import supabase
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -174,95 +175,74 @@ def get_open_trade() -> dict | None:
     return res.data[0] if res.data else None
 
 
-def open_trade_from_signal(
-    signal: dict,
-    executed_ask: float,
-    note: str | None = None
-) -> bool:
+def open_trade_from_signal(signal: dict, confirmed_price: float) -> bool:
     if DRY_RUN:
-        logger.info(f"[DRY_RUN] Would open trade from signal {signal.get('id')} @ {executed_ask}")
+        logger.info(f"[DRY_RUN] Would open trade from signal {signal.get('id')} @ {confirmed_price}")
         return True
 
     try:
-        existing = get_open_trade()
-        if existing:
-            logger.warning(
-                f"[DB] Cannot open trade: another OPEN trade already exists "
-                f"| trade_id={existing.get('id')} "
-                f"| entry_signal_id={existing.get('entry_signal_id')}"
-            )
-            return False
-
-        if not signal.get("id"):
-            logger.error("[DB] Cannot open trade: signal has no id")
-            return False
-
-        if executed_ask <= 0:
-            logger.error(f"[DB] Cannot open trade: invalid executed_ask={executed_ask}")
-            return False
-
-        payload = {
+        row = {
             "status": "OPEN",
             "entry_signal_id": signal["id"],
-            "entry_bar_time": signal.get("bar_time"),
-            "entry_ask": float(executed_ask),
+            "entry_ask": confirmed_price,
             "entry_bid_at_signal": signal.get("hsh_bid_price"),
             "entry_score": signal.get("ranker_score"),
-            "entry_note": note,
-            "created_at": "now()",
-            "updated_at": "now()",
+            "entry_bar_time": signal.get("bar_time"),
+            "entry_note": f"Confirmed via UI at {confirmed_price}",
         }
-
-        get_supabase_client().table(ACTIVE_TRADES_TABLE).insert(payload).execute()
-
-        logger.info(
-            f"[DB] ✅ OPEN trade created | signal_id={signal['id']} | entry_ask={executed_ask}"
-        )
-        return True
-
+        res = get_supabase_client().table(ACTIVE_TRADES_TABLE).insert(row).execute()
+        if res.data:
+            logger.info(f"[DB] ✅ Active trade opened | signal={signal.get('id')} | ask={confirmed_price}")
+            return True
+        logger.error(f"[open_trade] Insert returned no data: {res}")
+        return False
     except Exception as e:
-        logger.error(f"[DB] open_trade_from_signal failed: {e}")
+        logger.error(f"[open_trade] Failed: {e}")
         return False
 
-
-def close_open_trade(
-    exit_bid: float,
-    exit_signal_id: str | None = None,
-    exit_score: float | None = None,
-    reason: str = "MANUAL_SELL",
-    note: str | None = None
-) -> bool:
+def close_open_trade(exit_signal_id, exit_bid, exit_score=None, reason=None) -> bool:
     if DRY_RUN:
-        logger.info(f"[DRY_RUN] Would close open trade @ {exit_bid} | reason={reason}")
+        logger.info(f"[DRY_RUN] Would close open trade | exit_signal={exit_signal_id} | bid={exit_bid}")
         return True
 
-    trade = get_open_trade()
-    if not trade:
-        logger.warning("[DB] No OPEN trade to close")
-        return False
-
-    entry_ask = float(trade["entry_ask"])
-    pnl = float(exit_bid) - entry_ask
-
-    payload = {
-        "status": "CLOSED",
-        "exit_signal_id": exit_signal_id,
-        "exit_time": "now()",
-        "exit_bid": float(exit_bid),
-        "exit_score": exit_score,
-        "exit_reason": reason,
-        "exit_note": note,
-        "pnl_thb": pnl,
-        "updated_at": "now()",
-    }
-
+    from datetime import timezone as _tz  # avoid shadowing top-level import
     try:
-        get_supabase_client().table(ACTIVE_TRADES_TABLE).update(payload).eq("id", trade["id"]).execute()
-        logger.info(
-            f"[DB] ✅ OPEN trade closed | trade_id={trade['id']} | exit_bid={exit_bid} | pnl={pnl:.2f}"
-        )
-        return True
+        # Step 1: ดึง entry_ask จาก OPEN trade ก่อน เพื่อคำนวณ pnl_thb
+        pnl_thb = None
+        open_trade = get_open_trade()
+        if open_trade:
+            try:
+                entry_ask = float(open_trade["entry_ask"])
+                pnl_thb = round(float(exit_bid) - entry_ask, 2)
+            except (TypeError, KeyError, ValueError) as calc_err:
+                logger.warning(f"[close_trade] pnl_thb calc skipped: {calc_err}")
 
+        # Step 2: Update row
+        update_payload = {
+            "status": "CLOSED",
+            "exit_signal_id": exit_signal_id,
+            "exit_bid": exit_bid,
+            "exit_score": exit_score,
+            "exit_reason": reason,
+            "exit_time": datetime.now(_tz.utc).isoformat(),
+        }
+        if pnl_thb is not None:
+            update_payload["pnl_thb"] = pnl_thb
+
+        res = (
+            get_supabase_client()
+            .table(ACTIVE_TRADES_TABLE)
+            .update(update_payload)
+            .eq("status", "OPEN")
+            .execute()
+        )
+        if res.data:
+            logger.info(
+                f"[DB] ✅ Active trade closed | reason={reason} | bid={exit_bid} | pnl={pnl_thb} THB"
+            )
+            return True
+        logger.warning("[close_trade] No OPEN trade found to close (returned empty)")
+        return False
     except Exception as e:
-        logger.error(f"[DB] close_open_trade failed: {e}")
+        logger.error(f"[close_trade] Failed: {e}")
         return False
