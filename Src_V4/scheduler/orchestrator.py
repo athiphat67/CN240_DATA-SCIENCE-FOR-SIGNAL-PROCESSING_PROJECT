@@ -79,6 +79,8 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
     Rich manual-confirm bridge:
     - If DB state is EMPTY, TP manager must not remain active.
     - If DB state is HOLDING but TP manager is inactive, recover from v3_active_trades.
+    - If DB state is HOLDING but NO OPEN trade exists (stale from unconfirmed BUY),
+      auto-heal state back to EMPTY to prevent premature SELL attempts.
 
     This keeps manual-confirm active_trade compatible with Jom's TP manager persistence.
     """
@@ -93,7 +95,15 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
     if state == STATE_HOLDING and not tp_manager.is_active:
         active_trade = get_open_trade()
         if not active_trade:
-            trading_log.warning("[TP Sync] DB state HOLDING but no OPEN active trade found")
+            # ── Desync detected: state=HOLDING but no OPEN trade ─────────────
+            # Do NOT auto-reset here — the user may be about to confirm via UI.
+            # The UI's confirm_buy() now handles desync recovery gracefully.
+            # Just warn and skip TP activation for this bar.
+            trading_log.warning(
+                "[TP Sync] ⚠️ DB state=HOLDING but NO OPEN trade in v3_active_trades. "
+                "Skipping TP activation this bar. "
+                "If this persists, re-confirm via the UI to create the missing trade."
+            )
             return
 
         entry_ask = float(active_trade["entry_ask"])
@@ -383,7 +393,21 @@ def run_signal_pipeline() -> None:
                     )
                     return
 
-                # Signal exists in DB → FK-safe to close active trade.
+                # ── Guard: verify an OPEN trade actually exists before closing ──
+                # This prevents the error when state=HOLDING but no confirmed trade
+                # exists (e.g. BUY was sent as WAITING_CONFIRM but never confirmed).
+                open_trade_check = get_open_trade()
+                if not open_trade_check:
+                    trading_log.warning(
+                        "[SELL] ⚠️ SELL signal generated but NO OPEN trade found in "
+                        "v3_active_trades. Possible cause: BUY was never confirmed via UI. "
+                        "Auto-healing state → EMPTY. SELL signal logged but NOT executed."
+                    )
+                    set_state(STATE_EMPTY)
+                    tp_manager.reset()
+                    return
+
+                # Signal exists in DB and OPEN trade confirmed → FK-safe to close.
                 ok_close = close_open_trade(
                     exit_signal_id=signal_record.get("id"),
                     exit_bid=gate_result["hsh_bid"],

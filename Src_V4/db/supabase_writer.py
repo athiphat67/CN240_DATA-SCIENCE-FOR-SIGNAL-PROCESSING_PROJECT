@@ -5,7 +5,7 @@ import logging
 import supabase
 from pathlib import Path
 from datetime import datetime
-from typing import Any
+from typing import Any, Tuple
 from supabase import create_client, Client
 from config.settings import (
     DRY_RUN, SUPABASE_URL, SUPABASE_KEY,
@@ -175,12 +175,24 @@ def get_open_trade() -> dict | None:
     return res.data[0] if res.data else None
 
 
-def open_trade_from_signal(signal: dict, confirmed_price: float) -> bool:
+def open_trade_from_signal(signal: dict, confirmed_price: float) -> Tuple[bool, str]:
     if DRY_RUN:
         logger.info(f"[DRY_RUN] Would open trade from signal {signal.get('id')} @ {confirmed_price}")
-        return True
+        return True, ""
 
     try:
+        # ── Solution A: Auto-Cleanup Orphaned Trades ─────────────────────
+        # If the state is EMPTY but an OPEN trade exists, cancel it first
+        # to prevent the unique constraint violation.
+        existing_trade = get_open_trade()
+        if existing_trade:
+            logger.warning(f"[open_trade] Found orphaned OPEN trade {existing_trade['id']}. Auto-cancelling.")
+            get_supabase_client().table(ACTIVE_TRADES_TABLE).update({
+                "status": "CANCELLED",
+                "exit_reason": "AUTO_CANCEL_ORPHANED_ON_NEW_BUY",
+                "exit_note": "Cancelled automatically to allow new trade"
+            }).eq("id", existing_trade["id"]).execute()
+
         row = {
             "status": "OPEN",
             "entry_signal_id": signal["id"],
@@ -193,12 +205,12 @@ def open_trade_from_signal(signal: dict, confirmed_price: float) -> bool:
         res = get_supabase_client().table(ACTIVE_TRADES_TABLE).insert(row).execute()
         if res.data:
             logger.info(f"[DB] ✅ Active trade opened | signal={signal.get('id')} | ask={confirmed_price}")
-            return True
+            return True, ""
         logger.error(f"[open_trade] Insert returned no data: {res}")
-        return False
+        return False, "Insert returned no data."
     except Exception as e:
         logger.error(f"[open_trade] Failed: {e}")
-        return False
+        return False, str(e)
 
 def close_open_trade(exit_signal_id, exit_bid, exit_score=None, reason=None) -> bool:
     if DRY_RUN:

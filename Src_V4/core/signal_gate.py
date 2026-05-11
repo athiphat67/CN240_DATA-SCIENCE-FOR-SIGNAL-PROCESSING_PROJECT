@@ -59,15 +59,44 @@ def evaluate_signal_gate(inference_result: dict, features_row: FeaturesRow) -> d
         signal_type   = "BUY" if passed else "HOLD"  # 🔁 เปลี่ยน None → HOLD
         reject_reason = None if passed else next(k for k, v in buy_gates.items() if not v)
 
-    # ─── SELL Logic (state = HOLDING) ─────────────────────────────────────────
+    # ─── SELL Logic (state = HOLDING) ─────────────────────────────────────────────
     elif current_state == STATE_HOLDING:
+        # ── Profit-Aware Exit Check (Option 3) ──────────────────────────
+        # The model is only allowed to exit if the trade is actually in profit.
+        # If in a drawdown, we hold and let the Dynamic TP Manager handle the actual Stop Loss.
+        profit_ok = False
+        
+        try:
+            from db.supabase_writer import get_open_trade
+            open_trade = get_open_trade()
+            if open_trade and open_trade.get("entry_ask"):
+                entry_ask = float(open_trade["entry_ask"])
+                current_bid = float(features_row["hsh_close_bid"])
+                
+                is_in_profit = current_bid > entry_ask
+                
+                if is_in_profit:
+                    profit_ok = True
+                else:
+                    logger.info(
+                        f"[Gate] 🛑 SELL suppressed: Not in profit (Bid: {current_bid} <= Ask: {entry_ask}). "
+                        "Waiting for TP Manager to handle Stop Loss."
+                    )
+            else:
+                # Fallback if no trade data is found
+                profit_ok = True 
+        except Exception as _e:
+            logger.warning(f"[Gate] Profit-Aware check skipped: {_e}")
+            profit_ok = True
+
         sell_gates = {
             **base_gates,
-            "score_below_threshold" : score < SIGNAL_THRESHOLD,
+            "score_below_threshold": score < SIGNAL_THRESHOLD,
+            "profit_ok"            : profit_ok,
         }
         gates_detail = sell_gates
         passed = all(sell_gates.values())
-        signal_type   = "SELL" if passed else "HOLD" # 🔁 เปลี่ยน None → HOLD
+        signal_type   = "SELL" if passed else "HOLD"  # 🔁 เปลี่ยน None → HOLD
         reject_reason = None if passed else next(k for k, v in sell_gates.items() if not v)
             
     else:

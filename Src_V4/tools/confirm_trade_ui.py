@@ -161,7 +161,16 @@ def confirm_buy(price_str: str, signal_id: str):
 
         current = get_current_state()
         if current == STATE_HOLDING:
-            return "⚠️ State เป็น HOLDING อยู่แล้ว — ไม่ต้องทำอะไร"
+            # ── Guard: only block if a real OPEN trade exists ──────────────
+            # If state=HOLDING but NO trade in v3_active_trades, the state is
+            # desynchronised. Allow the confirm to proceed and create the trade.
+            from db.supabase_writer import get_open_trade as _get_open
+            if _get_open():
+                return "⚠️ State เป็น HOLDING อยู่แล้ว และมี OPEN trade อยู่ — ไม่ต้องทำอะไร"
+            logger.warning(
+                "[UI] State=HOLDING but no OPEN trade found — "
+                "proceeding to create missing trade (desync recovery)."
+            )
 
         is_manual = False
 
@@ -190,9 +199,9 @@ def confirm_buy(price_str: str, signal_id: str):
                 return f"❌ Invalid signal state_before: {s.get('state_before')}. Expected EMPTY."
 
         # ── เปิด active trade ──────────────────────────────────────────────
-        ok_trade = open_trade_from_signal(s, price)
+        ok_trade, err_msg = open_trade_from_signal(s, price)
         if not ok_trade:
-            return "❌ Failed to open active trade. State was NOT changed."
+            return f"❌ Failed to open active trade. DB Error: {err_msg}"
 
         # ── mark signal (ถ้าไม่ใช่ manual ที่ CONFIRMED ไปแล้ว) ───────────
         if not is_manual:
@@ -293,7 +302,21 @@ def force_reset_state(target: str):
     """Force reset State (กรณีฉุกเฉิน)"""
     try:
         new_state = STATE_HOLDING if target == "HOLDING" else STATE_EMPTY
-        # update_state(new_state)
+        
+        # ── Solution B: Auto-cleanup on Force Reset ─────────────────
+        if new_state == STATE_EMPTY:
+            from db.supabase_writer import get_open_trade, get_supabase_client
+            from config.settings import ACTIVE_TRADES_TABLE
+            
+            existing_trade = get_open_trade()
+            if existing_trade:
+                logger.info(f"[UI] Force Reset to EMPTY: Cancelling orphaned trade {existing_trade['id']}")
+                get_supabase_client().table(ACTIVE_TRADES_TABLE).update({
+                    "status": "CANCELLED",
+                    "exit_reason": "FORCE_RESET_TO_EMPTY",
+                    "exit_note": "Cancelled via UI Force Reset"
+                }).eq("id", existing_trade["id"]).execute()
+                
         set_state(new_state)
         now_str = datetime.now(TZ_BKK).strftime("%H:%M:%S")
         return f"✅ Force Reset → {new_state} | {now_str}"
