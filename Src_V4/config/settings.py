@@ -34,11 +34,9 @@ SESSION_HOURS = {
     "Afternoon" : (12*60, 18*60),   # 12:00 - 17:59 → 720-1080 นาที
     "Night"     : (18*60, 2*60),    # 18:00 - 01:59 → 1080-120 นาที [ข้ามเที่ยงคืน]
 }
-# ⚠️ Reference only:
-# ค่านี้ไม่ได้ถูกใช้ใน core/feature_engine.py
-# feature_engine.py ใช้ _SESSION_EXPECTED = {'Morning': 18, 'Afternoon': 27, 'Night': 48}
-# ซึ่ง sync กับ training script และห้ามเปลี่ยนโดยไม่ retrain model
-# ห้ามนำ SESSION_EXPECTED_BARS ไปใช้คำนวณ F_FSP / F_Remaining_Vol / F_SRVR โดยตรง
+# ⚠️ Note:
+# feature_engine.py uses _SESSION_EXPECTED = {'Morning': 36, 'Afternoon': 36, 'Night': 48}
+# which matches app.py (source of truth) and SESSION_EXPECTED_BARS below.
 SESSION_EXPECTED_BARS = {
     "Morning"   : 36,  # 6 ชม. × 6 แท่ง/ชม.
     "Afternoon" : 36,  # 6 ชม. × 6 แท่ง/ชม.
@@ -53,10 +51,10 @@ VOL_WINDOW          = 144
 SPREAD_NORM_WINDOW  = 144
 
 # ─── Signal Gate Thresholds ───────────────────────────────────────────────────
-GATE_SRVR_MIN           = 0.15
-GATE_SPREAD_NORM_MAX    = 1.5
-GATE_REGIME_REQUIRED    = 0
-BUY_GATE_MODE           = os.getenv("BUY_GATE_MODE", "STRICT")  # STRICT | LIVE_RELAXED
+GATE_SRVR_MIN        = 0.0   # ปิด — srvr=0 เกิดจาก session ที่ยังไม่มี volume data
+GATE_SPREAD_NORM_MAX = 2.5   # คงเดิม
+GATE_REGIME_REQUIRED = 0     # ปิด — หรือใช้ LIVE_RELAXED
+BUY_GATE_MODE        = "LIVE_RELAXED"
 
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")

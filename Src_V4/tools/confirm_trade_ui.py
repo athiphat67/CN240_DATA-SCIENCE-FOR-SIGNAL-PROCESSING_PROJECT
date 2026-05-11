@@ -171,7 +171,7 @@ def confirm_buy(price_str: str, signal_id: str):
 
         # update_state(STATE_HOLDING)
         set_state(STATE_HOLDING)
-        send_trade_log("BUY", price, "MANUAL_BUY_CONFIRMED")
+        #send_trade_log("BUY", price, "MANUAL_BUY_CONFIRMED")
         notify_buy_confirmed(signal_id, price)
 
         now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
@@ -237,7 +237,7 @@ def confirm_sell(price_str: str):
 
         # update_state(STATE_EMPTY) # DB legacy fallback
         set_state(STATE_EMPTY)
-        send_trade_log("SELL", price, "MANUAL_SELL_CONFIRMED")
+        #send_trade_log("SELL", price, "MANUAL_SELL_CONFIRMED")
         notify_sell_confirmed(price, "MANUAL_SELL_CONFIRMED")
 
         now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
