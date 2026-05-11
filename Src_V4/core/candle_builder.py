@@ -84,7 +84,11 @@ def _filter_sessions(df: pd.DataFrame) -> pd.DataFrame:
             # Session ข้ามเที่ยงคืน (Night: 18:00-01:59)
             mask |= (time_in_mins >= start_min) | (time_in_mins < end_min)
             
-    return df[mask].copy()
+    # ตัดเสาร์-อาทิตย์ (5=Sat, 6=Sun) อย่างเด็ดขาด (ตรงกับ Training Data)
+    weekend_mask = (df.index.dayofweek < 5)
+    final_mask = mask & weekend_mask
+            
+    return df[final_mask].copy()
 
 def build_candles() -> pd.DataFrame:
     """
