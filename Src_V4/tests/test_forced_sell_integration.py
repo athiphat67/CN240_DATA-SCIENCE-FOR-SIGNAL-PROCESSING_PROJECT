@@ -44,6 +44,7 @@ def _make_holding_mocks(mock_candles, mock_features, mock_inference, mock_gate):
 
 
 class TestForcedSellSLHit:
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_sell_signal")
     @patch("scheduler.orchestrator.notify_dynamic_tp")
     @patch("scheduler.orchestrator.notify_error")
@@ -65,11 +66,23 @@ class TestForcedSellSLHit:
         "entry_bid_at_signal": 40050.0,
     })
     def test_sl_hit_full_flow(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar,
-        mock_close, mock_mark, mock_set_state,
-        mock_notify_error, mock_notify_tp, mock_notify_sell,
+        self,
+        mock_send_trade_log,
+        mock_notify_sell,
+        mock_notify_tp,
+        mock_notify_error,
+        mock_set_state,
+        mock_mark,
+        mock_close,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         features, inf = _make_holding_mocks(
             mock_candles, mock_features, mock_inference, mock_gate
@@ -110,9 +123,11 @@ class TestForcedSellSLHit:
         mock_insert_bar.assert_called_once()
         bar_log = mock_insert_bar.call_args[0][0]
         assert bar_log["state_at_bar"] == "HOLDING"
+        mock_send_trade_log.assert_called_once()
 
 
 class TestForcedSellInsertFail:
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_sell_signal")
     @patch("scheduler.orchestrator.notify_dynamic_tp")
     @patch("scheduler.orchestrator.notify_error")
@@ -133,11 +148,22 @@ class TestForcedSellInsertFail:
         "entry_bid_at_signal": 40050.0,
     })
     def test_insert_fail_aborts(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar,
-        mock_close, mock_set_state,
-        mock_notify_error, mock_notify_tp, mock_notify_sell,
+        self,
+        mock_send_trade_log,
+        mock_notify_sell,
+        mock_notify_tp,
+        mock_notify_error,
+        mock_set_state,
+        mock_close,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         features, inf = _make_holding_mocks(
             mock_candles, mock_features, mock_inference, mock_gate
@@ -152,11 +178,13 @@ class TestForcedSellInsertFail:
         mock_close.assert_not_called()
         mock_set_state.assert_not_called()
         mock_notify_error.assert_called_once()
+        mock_send_trade_log.assert_not_called()
 
 
 class TestForcedSellIgnoredWhenEmpty:
     """SL_HIT/TRAIL_HIT must be ignored if state != HOLDING."""
 
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_sell_signal")
     @patch("scheduler.orchestrator.notify_dynamic_tp")
     @patch("scheduler.orchestrator.set_state")
@@ -173,10 +201,21 @@ class TestForcedSellIgnoredWhenEmpty:
     @patch("scheduler.orchestrator.get_current_state", return_value="EMPTY")
     @patch("scheduler.orchestrator.get_open_trade", return_value=None)
     def test_sl_hit_ignored_when_empty(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar,
-        mock_close, mock_set_state, mock_notify_tp, mock_notify_sell,
+        self,
+        mock_send_trade_log,
+        mock_notify_sell,
+        mock_notify_tp,
+        mock_set_state,
+        mock_close,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         """TP manager not active when state EMPTY → SL_HIT cannot fire."""
         features, inf = _make_holding_mocks(
@@ -193,3 +232,4 @@ class TestForcedSellIgnoredWhenEmpty:
         # close_open_trade and set_state(EMPTY) must NOT be called
         mock_close.assert_not_called()
         mock_set_state.assert_not_called()
+        mock_send_trade_log.assert_called_once()

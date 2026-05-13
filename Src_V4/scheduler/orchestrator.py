@@ -37,6 +37,7 @@ from notifier.discord_notifier import (
     notify_error,
     notify_dynamic_tp,
 )
+from notifier.trade_log_api import send_trade_log
 from rationale.generator import build_trade_payload
 
 TZ = pytz.timezone(TIMEZONE)
@@ -130,6 +131,25 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
         )
         _save_tp_state_if_supported()
         trading_log.info("[TP Sync] TP manager activated from active trade")
+
+
+def _send_model_signal_trade_log(gate_result: dict, inference_result: dict) -> None:
+    """Post gate output (BUY / SELL / HOLD) to the external trade log API each bar."""
+    st = gate_result.get("signal_type") or "HOLD"
+    if st == "BUY":
+        price = gate_result["hsh_ask"]
+    elif st == "SELL":
+        price = gate_result["hsh_bid"]
+    else:
+        price = gate_result["hsh_bid"]
+    passed = gate_result.get("passed", False)
+    rr = gate_result.get("reject_reason") or ""
+    sid = gate_result.get("signal_id", "")
+    score = float(inference_result.get("ranker_score", 0.0))
+    reason = f"MODEL_{st}|passed={passed}|score={score:.4f}|id={sid}"
+    if rr:
+        reason += f"|gate={rr}"
+    send_trade_log(st, price, reason)
 
 
 def run_signal_pipeline() -> None:
@@ -333,6 +353,11 @@ def run_signal_pipeline() -> None:
                 "xau_close": features_row["xau_close"],
             }
             notify_sell_signal(forced_gate_result, rationale_payload)
+            send_trade_log(
+                "SELL",
+                exit_bid_price,
+                f"FORCED_{tp_trigger}|score={inference_result['ranker_score']:.4f}|id={forced_signal_id}",
+            )
 
             tp_manager.reset()
             trading_log.warning(
@@ -377,6 +402,7 @@ def run_signal_pipeline() -> None:
             "atr_48": features_row["F_ATR_48"],
             "features_snap": signal_record["features_snap"],
         })
+        _send_model_signal_trade_log(gate_result, inference_result)
 
         # ─── Action & State Update ────────────────────────────────────────────
         if gate_result["passed"] and gate_result["signal_type"]:

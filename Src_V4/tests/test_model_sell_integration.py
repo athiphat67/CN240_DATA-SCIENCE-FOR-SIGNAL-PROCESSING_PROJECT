@@ -10,6 +10,7 @@ from tests.conftest import (
 
 
 class TestModelSellSuccess:
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_sell_signal")
     @patch("scheduler.orchestrator.notify_error")
     @patch("scheduler.orchestrator.set_state")
@@ -27,11 +28,22 @@ class TestModelSellSuccess:
     @patch("scheduler.orchestrator.get_current_state", return_value="HOLDING")
     @patch("scheduler.orchestrator.get_open_trade", return_value={"id": 1, "entry_ask": 40100.0, "entry_score": 0.15, "entry_bid_at_signal": 40050.0})
     def test_model_sell_full_flow(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar,
-        mock_mark, mock_close, mock_set_state,
-        mock_notify_error, mock_notify_sell,
+        self,
+        mock_send_trade_log,
+        mock_notify_sell,
+        mock_notify_error,
+        mock_set_state,
+        mock_close,
+        mock_mark,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         mock_candles.return_value = MagicMock()
         mock_features.return_value = MOCK_FEATURES_ROW.copy()
@@ -49,11 +61,13 @@ class TestModelSellSuccess:
         mock_set_state.assert_called_once_with("EMPTY")
         mock_notify_sell.assert_called_once()
         assert not tp_manager.is_active, "TP must be reset after SELL"
+        assert mock_send_trade_log.call_count >= 1
 
 
 class TestModelSellInsertFail:
     """P1-3: If insert_signal fails, SELL must abort."""
 
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_sell_signal")
     @patch("scheduler.orchestrator.notify_error")
     @patch("scheduler.orchestrator.set_state")
@@ -70,10 +84,21 @@ class TestModelSellInsertFail:
     @patch("scheduler.orchestrator.get_current_state", return_value="HOLDING")
     @patch("scheduler.orchestrator.get_open_trade", return_value={"id": 1, "entry_ask": 40100.0, "entry_score": 0.15, "entry_bid_at_signal": 40050.0})
     def test_insert_fail_aborts_sell(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar,
-        mock_close, mock_set_state, mock_notify_error, mock_notify_sell,
+        self,
+        mock_send_trade_log,
+        mock_notify_sell,
+        mock_notify_error,
+        mock_set_state,
+        mock_close,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         mock_candles.return_value = MagicMock()
         mock_features.return_value = MOCK_FEATURES_ROW.copy()
@@ -87,9 +112,11 @@ class TestModelSellInsertFail:
         mock_close.assert_not_called()
         mock_set_state.assert_not_called()
         mock_notify_error.assert_called_once()
+        mock_send_trade_log.assert_called_once()
 
 
 class TestModelSellCloseFail:
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_sell_signal")
     @patch("scheduler.orchestrator.notify_error")
     @patch("scheduler.orchestrator.set_state")
@@ -106,10 +133,21 @@ class TestModelSellCloseFail:
     @patch("scheduler.orchestrator.get_current_state", return_value="HOLDING")
     @patch("scheduler.orchestrator.get_open_trade", return_value={"id": 1, "entry_ask": 40100.0, "entry_score": 0.15, "entry_bid_at_signal": 40050.0})
     def test_close_fail_aborts_state_change(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar,
-        mock_close, mock_set_state, mock_notify_error, mock_notify_sell,
+        self,
+        mock_send_trade_log,
+        mock_notify_sell,
+        mock_notify_error,
+        mock_set_state,
+        mock_close,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         mock_candles.return_value = MagicMock()
         mock_features.return_value = MOCK_FEATURES_ROW.copy()
@@ -122,3 +160,4 @@ class TestModelSellCloseFail:
         # State must NOT change when close fails
         mock_set_state.assert_not_called()
         mock_notify_error.assert_called_once()
+        mock_send_trade_log.assert_called_once()
