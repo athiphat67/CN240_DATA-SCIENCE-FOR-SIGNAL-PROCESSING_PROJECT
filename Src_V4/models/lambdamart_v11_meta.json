@@ -1,0 +1,21 @@
+{
+  "model_name": "lambdamart_v11",
+  "trained_at": "2026-05-05T10:00:00+07:00",
+  "timeframe": "M10",
+  "n_trees": 420,
+  "feature_cols": [
+    "F_Syn_Price", "F_Thai_Premium", "F_Corr_XAU_USD",
+    "F_XAU_Mom_Short", "F_XAU_Mom_Mid", "F_USD_Mom",
+    "F_ATR_48", "F_Regime", "F_FSP", "F_SA_TWAP_Dev",
+    "F_SA_MDD", "F_SA_Vol", "F_SA_Range", "F_SA_Position",
+    "F_Historical_Vol_THB", "F_Remaining_Vol", "F_SRVR",
+    "F_Price_Vs_Open", "F_Mom_1bar", "F_Mom_3bar",
+    "F_SA_Drawdown_Pct", "F_HSH_vs_THBGold_Dev",
+    "F_DayOfWeek", "F_MinuteOfDay",
+    "F_RSI_14", "F_RSI_6", "F_BB_Pos", "F_XAU_Spread_Norm",
+    "F_Hour_Sin", "F_Hour_Cos", "F_Session_Type",
+    "F_HSH_Spread", "F_Spread_Cost_Pct", "F_Spread_vs_ATR"
+  ],
+  "signal_threshold": 0.07,
+  "notes": "Retrained on M10 data. Dropped F_SA_Vol from v10."
+}

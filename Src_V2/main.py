@@ -753,18 +753,12 @@ def send_trade_log_from_result(
     )
 
     try:
-        send_trade_log(
-            action=decision.final,
-            price=price,
-            reason=reason,
-            api_key=team_api_key,
-            # confidence=confidence,
-            # stop_loss=stop_loss,
-            # take_profit=take_profit,
-            # provider=PROVIDER_TAG,
-            # session_id=market_state.get("session_gate", {}).get("session_id"),
-            # run_id=run_id,
-        )
+        # send_trade_log(
+        #     action=decision.final,
+        #     price=price,
+        #     reason=reason,
+        #     api_key=team_api_key,
+        # )
         if emit_logs:
             sys_logger.info("[trade_log] sent")
     except Exception as exc:
