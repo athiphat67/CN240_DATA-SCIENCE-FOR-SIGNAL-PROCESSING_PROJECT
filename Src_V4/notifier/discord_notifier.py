@@ -147,6 +147,22 @@ def notify_buy_confirmed(signal_id: str, price: float, note: str = "") -> None:
     )
 
 
+def notify_sl_recovered(
+    bar_time: str,
+    signal_id: str,
+    score: float,
+    bid: float,
+) -> None:
+    """Pending SL exit cancelled because model score bounced back."""
+    send_discord(
+        f"✅ **SL RECOVERED** — `{bar_time}`\n"
+        f"```\nSignal ID   : {signal_id}\n"
+        f"Score       : {score:.4f}  ← momentum returned\n"
+        f"HSH Bid     : {bid:,.2f} THB\n```\n"
+        f"Pending SELL cancelled — ยังถือต่อ"
+    )
+
+
 def notify_sell_confirmed(
     price: float,
     reason: str = "MANUAL_SELL",
