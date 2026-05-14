@@ -28,6 +28,7 @@ from db.supabase_writer import (
     insert_bar_log,
     get_open_trade,
     get_latest_pending_sell_signal,
+    mark_signal_execution,
 )
 from notifier.discord_notifier import (
     notify_buy_signal,
@@ -35,6 +36,7 @@ from notifier.discord_notifier import (
     notify_heartbeat,
     notify_error,
     notify_dynamic_tp,
+    notify_sl_recovered,
 )
 from notifier.trade_log_api import send_trade_log
 from rationale.generator import build_trade_payload
@@ -192,6 +194,35 @@ def run_signal_pipeline() -> None:
                     f"status={existing_pending_sell.get('execution_status')}) — "
                     f"TP eval and new SELL signals suppressed this bar."
                 )
+
+        # ── SL Recovery: score bounce check ──────────────────────────────────
+        # Runs only when a FORCED pending SELL (SL_HIT or TRAIL_HIT) is waiting.
+        # If model score recovers above entry_score - margin → cancel pending, hold on.
+        # All actual exits require user confirmation via the web UI.
+        if (
+            existing_pending_sell is not None
+            and current_state == STATE_HOLDING
+            and tp_manager.is_active
+        ):
+            pending_trigger = existing_pending_sell.get("reject_reason", "")
+            if pending_trigger in ("FORCED_BY_SL_HIT", "FORCED_BY_TRAIL_HIT"):
+                current_score = inference_result["ranker_score"]
+                current_bid   = features_row["hsh_close_bid"]
+                pending_id    = existing_pending_sell.get("id", "UNKNOWN")
+
+                if tp_manager.should_cancel_pending_sell(current_score):
+                    trading_log.info(
+                        f"[SL Recovery] ✅ Score recovered to {current_score:.4f} — "
+                        f"cancelling pending SELL {pending_id}"
+                    )
+                    mark_signal_execution(
+                        pending_id, "CANCELLED",
+                        note=f"Score recovered to {current_score:.4f}",
+                    )
+                    notify_sl_recovered(
+                        features_row["bar_time"], pending_id, current_score, current_bid
+                    )
+                    existing_pending_sell = None  # allow normal pipeline to continue
 
         tp_trigger, tp_price, trail_level = "NONE", None, 0.0
 

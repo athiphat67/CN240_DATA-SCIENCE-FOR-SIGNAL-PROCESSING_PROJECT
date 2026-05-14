@@ -14,13 +14,15 @@ class DynamicTPManager:
         atr_multiplier: float = 1.5,
         breakeven_atr_mult: float = 1.0,
         score_drop_threshold: float = 0.15,
-        be_floor_offset: float = 2.0
+        be_floor_offset: float = 2.0,
+        recovery_score_margin: float = 0.10,
     ):
         self.atr_mult = atr_multiplier
         self.be_mult = breakeven_atr_mult
         self.score_drop_thresh = score_drop_threshold
         self.be_floor_offset = be_floor_offset
-        
+        self.recovery_score_margin = recovery_score_margin
+
         self.is_active = False
         self.entry_ask: Optional[float] = None
         self.entry_score: Optional[float] = None
@@ -94,6 +96,14 @@ class DynamicTPManager:
 
         # 📈 Priority 5: Normal
         return "TP_UPDATED", active_trail, active_trail
+
+    # ── Pending-sell recovery helpers ────────────────────────────────────────
+
+    def should_cancel_pending_sell(self, current_score: float) -> bool:
+        """Return True if the model score has recovered enough to cancel a pending SL exit."""
+        if self.entry_score is None:
+            return False
+        return current_score >= (self.entry_score - self.recovery_score_margin)
 
     # ── Restart persistence ───────────────────────────────────────────────────
 

@@ -140,6 +140,28 @@ def test_sl_hit():
     assert trigger == "SL_HIT", f"Expected SL_HIT, got {trigger}"
     assert price == 29900.0
 
+# ─── SL Recovery Scenarios ───────────────────────────────────────────────────
+
+def test_sl_recovery_score_bounced():
+    """Bar after SL: score bounces back above entry_score - 0.10 → cancel pending SELL."""
+    tp = DynamicTPManager(recovery_score_margin=0.10)
+    tp.activate(30000.0, entry_score=0.50, initial_bid=30000.0, sl_price=29900.0)
+    tp.update(current_bid=29850.0, atr_48=100.0, current_score=0.30)  # SL_HIT bar
+
+    # Next bar: score recovers to 0.43 (>= 0.50 - 0.10 = 0.40)
+    assert tp.should_cancel_pending_sell(0.43) is True,  "score=0.43 should cancel"
+    assert tp.should_cancel_pending_sell(0.40) is True,  "score=0.40 (boundary) should cancel"
+    assert tp.should_cancel_pending_sell(0.39) is False, "score=0.39 should NOT cancel"
+
+def test_sl_recovery_score_still_low():
+    """Bar after SL: score stays below threshold → do not cancel, keep pending."""
+    tp = DynamicTPManager(recovery_score_margin=0.10)
+    tp.activate(30000.0, entry_score=0.50, initial_bid=30000.0, sl_price=29900.0)
+    tp.update(current_bid=29850.0, atr_48=100.0, current_score=0.20)  # SL_HIT bar
+
+    # Next bar: score is 0.25 — still well below 0.40 threshold
+    assert tp.should_cancel_pending_sell(0.25) is False, "score=0.25 should NOT cancel"
+
 # ─── Main Runner ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 55)
@@ -158,6 +180,9 @@ if __name__ == "__main__":
         test_invalid_atr_returns_none,
         test_trigger_priority_trail_vs_score,
         test_sl_hit,
+        # SL recovery
+        test_sl_recovery_score_bounced,
+        test_sl_recovery_score_still_low,
     ]
 
     for test in test_list:
