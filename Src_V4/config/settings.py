@@ -60,6 +60,20 @@ GATE_SPREAD_NORM_MAX = 2.5   # คงเดิม
 GATE_REGIME_REQUIRED = 0     # ปิด — หรือใช้ LIVE_RELAXED
 BUY_GATE_MODE        = "LIVE_RELAXED"
 
+# ─── BUY Signal Config (per-session) ─────────────────────────────────────────
+# score_threshold : ranker_score ขั้นต่ำในแต่ละ session
+# bb_pos_max      : F_BB_Pos ต้องไม่เกิน (None = ปิด filter)
+# rsi6_max        : F_RSI_6 ต้องไม่เกิน (ป้องกันซื้อตอน overbought)
+SIGNAL_CONFIG: dict = {
+    "score_threshold_morning"   : 0.25,
+    "score_threshold_afternoon" : 0.50,
+    "score_threshold_night"     : 0.40,
+    "bb_pos_max_morning"        : None,   # ปิด filter — ช่วงเช้าไม่ restrict BB
+    "bb_pos_max_afternoon"      : 0.5,
+    "bb_pos_max_night"          : 0.5,
+    "rsi6_max"                  : 50,     # ใช้กับทุก session (RSI6 ≤ 50 = ยังไม่ overbought)
+}
+
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
