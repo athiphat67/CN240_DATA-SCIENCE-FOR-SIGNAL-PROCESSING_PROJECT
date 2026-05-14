@@ -61,21 +61,24 @@ def test_tp_updated_on_price_increase():
     """Price moves up enough that raw_trail stays above be_floor"""
     tp = DynamicTPManager(atr_multiplier=1.5, breakeven_atr_mult=1.0, score_drop_threshold=0.15)
     tp.activate(30000.0, 0.75, 30000.0)
-    # be_floor = 30000 + 15 = 30015 | Need bid > 30165 so raw_trail > be_floor
-    trigger, price, trail = tp.update(current_bid=30200.0, atr_48=100.0, current_score=0.74)
+    # Lock breakeven first to bypass BREAKEVEN_LOCK event on subsequent updates
+    tp.update(current_bid=30100.0, atr_48=100.0, current_score=0.75)
+    
+    # be_floor = 30000 + max(2.0, 100) = 30100
+    trigger, price, trail = tp.update(current_bid=30300.0, atr_48=100.0, current_score=0.74)
     assert trigger == "TP_UPDATED", f"Expected TP_UPDATED, got {trigger}"
     assert price is not None
-    # raw_trail = 30200 - 150 = 30050 | active = max(30050, 30015) = 30050
-    assert trail == 30050.0, f"Trail should be 30050, got {trail}"
+    # raw_trail = 30300 - 150 = 30150 | active = max(30150, 30100) = 30150
+    assert trail == 30150.0, f"Trail should be 30150, got {trail}"
 
 def test_breakeven_lock_fires_once():
     tp = DynamicTPManager(atr_multiplier=1.5, breakeven_atr_mult=1.0, score_drop_threshold=0.15)
     tp.activate(30000.0, 0.75, 30000.0)
-    # Profit reaches exactly 1.0x ATR
+    # Profit reaches exactly 1.0x ATR -> 30100
     trigger, price, trail = tp.update(current_bid=30100.0, atr_48=100.0, current_score=0.75)
     assert trigger == "BREAKEVEN_LOCK", f"Expected BREAKEVEN_LOCK, got {trigger}"
     assert tp._breakeven_locked is True
-    assert trail == 30015.0
+    assert trail == 30100.0
 
     # Subsequent update should NOT fire BREAKEVEN_LOCK again
     trigger2, _, trail2 = tp.update(current_bid=30150.0, atr_48=100.0, current_score=0.74)
@@ -85,22 +88,25 @@ def test_breakeven_lock_fires_once():
 def test_trail_hit_when_price_drops():
     tp = DynamicTPManager(atr_multiplier=1.5, breakeven_atr_mult=1.0, score_drop_threshold=0.15)
     tp.activate(30000.0, 0.75, 30000.0)
-    # Move price up to establish a higher trail
+    # Move price up to lock breakeven
     tp.update(current_bid=30200.0, atr_48=100.0, current_score=0.74)
-    # highest_bid = 30200, raw_trail = 30050, be_floor = 30015 → active_trail = 30050
-    trigger, price, trail = tp.update(current_bid=30040.0, atr_48=100.0, current_score=0.70)
+    # highest_bid = 30200, raw_trail = 30050, be_floor = 30100 → active_trail = 30100
+    trigger, price, trail = tp.update(current_bid=30090.0, atr_48=100.0, current_score=0.70)
     assert trigger == "TRAIL_HIT", f"Expected TRAIL_HIT, got {trigger}"
-    assert trail == 30050.0
-    assert price == 30050.0
+    assert trail == 30100.0
+    assert price == 30100.0
 
 def test_score_fade_on_confidence_drop():
     """Score drops significantly while price stays safely above trail"""
     tp = DynamicTPManager(atr_multiplier=1.5, breakeven_atr_mult=1.0, score_drop_threshold=0.15)
     tp.activate(30000.0, 0.80, 30000.0)
-    # Bid high enough to clear breakeven floor (bid > 30165)
+    # Lock breakeven
+    tp.update(current_bid=30200.0, atr_48=100.0, current_score=0.80)
+    
+    # Trigger score fade
     trigger, _, trail = tp.update(current_bid=30200.0, atr_48=100.0, current_score=0.64)
     assert trigger == "SCORE_FADE", f"Expected SCORE_FADE, got {trigger}"
-    assert trail == 30050.0  # Trail unchanged, score triggered warning
+    assert trail == 30100.0  # Trail unchanged, score triggered warning
 
 def test_inactive_returns_none():
     tp = DynamicTPManager()

@@ -14,6 +14,7 @@ from config.settings import (
     TP_BREAKEVEN_ATR_MULT,
     TP_SCORE_DROP_THRESH,
     TP_SL_ATR_MULT,
+    TP_BE_FLOOR_OFFSET,
 )
 from core.candle_builder import build_candles
 from core.feature_engine import compute_features
@@ -36,6 +37,7 @@ from notifier.discord_notifier import (
     notify_error,
     notify_dynamic_tp,
 )
+from notifier.trade_log_api import send_trade_log
 from rationale.generator import build_trade_payload
 
 TZ = pytz.timezone(TIMEZONE)
@@ -50,6 +52,7 @@ tp_manager = DynamicTPManager(
     atr_multiplier=TP_ATR_MULTIPLIER,
     breakeven_atr_mult=TP_BREAKEVEN_ATR_MULT,
     score_drop_threshold=TP_SCORE_DROP_THRESH,
+    be_floor_offset=TP_BE_FLOOR_OFFSET
 )
 
 # Jom logic: recover in-memory TP state from disk if DynamicTPManager supports it.
@@ -77,6 +80,8 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
     Rich manual-confirm bridge:
     - If DB state is EMPTY, TP manager must not remain active.
     - If DB state is HOLDING but TP manager is inactive, recover from v3_active_trades.
+    - If DB state is HOLDING but NO OPEN trade exists (stale from unconfirmed BUY),
+      auto-heal state back to EMPTY to prevent premature SELL attempts.
 
     This keeps manual-confirm active_trade compatible with Jom's TP manager persistence.
     """
@@ -91,20 +96,32 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
     if state == STATE_HOLDING and not tp_manager.is_active:
         active_trade = get_open_trade()
         if not active_trade:
-            trading_log.warning("[TP Sync] DB state HOLDING but no OPEN active trade found")
+            # ── Desync detected: state=HOLDING but no OPEN trade ─────────────
+            # Do NOT auto-reset here — the user may be about to confirm via UI.
+            # The UI's confirm_buy() now handles desync recovery gracefully.
+            # Just warn and skip TP activation for this bar.
+            trading_log.warning(
+                "[TP Sync] ⚠️ DB state=HOLDING but NO OPEN trade in v3_active_trades. "
+                "Skipping TP activation this bar. "
+                "If this persists, re-confirm via the UI to create the missing trade."
+            )
             return
 
         entry_ask = float(active_trade["entry_ask"])
         entry_score = float(active_trade["entry_score"])
         initial_bid = float(active_trade.get("entry_bid_at_signal") or entry_ask)
 
-        atr_48 = None
-        if features_row:
-            atr_48 = features_row.get("F_ATR_48")
+        atr_thb = 0.0
+        if features_row and features_row.get("F_ATR_48"):
+            # Convert USD ATR to THB ATR
+            # F_ATR_48 is in USD/oz. Formula: USD_ATR * (15.244 / 31.1035) * USD_THB_Rate
+            atr_48 = float(features_row["F_ATR_48"])
+            usd_close = float(features_row.get("usd_close", 32.4))
+            atr_thb = atr_48 * (15.244 / 31.1035) * usd_close
 
         sl_price = None
-        if atr_48 and float(atr_48) > 0:
-            sl_price = entry_ask - (float(atr_48) * TP_SL_ATR_MULT)
+        if atr_thb > 0:
+            sl_price = entry_ask - (atr_thb * TP_SL_ATR_MULT)
 
         tp_manager.activate(
             entry_ask=entry_ask,
@@ -114,6 +131,25 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
         )
         _save_tp_state_if_supported()
         trading_log.info("[TP Sync] TP manager activated from active trade")
+
+
+def _send_model_signal_trade_log(gate_result: dict, inference_result: dict) -> None:
+    """Post gate output (BUY / SELL / HOLD) to the external trade log API each bar."""
+    st = gate_result.get("signal_type") or "HOLD"
+    if st == "BUY":
+        price = gate_result["hsh_ask"]
+    elif st == "SELL":
+        price = gate_result["hsh_bid"]
+    else:
+        price = gate_result["hsh_bid"]
+    passed = gate_result.get("passed", False)
+    rr = gate_result.get("reject_reason") or ""
+    sid = gate_result.get("signal_id", "")
+    score = float(inference_result.get("ranker_score", 0.0))
+    reason = f"MODEL_{st}|passed={passed}|score={score:.4f}|id={sid}"
+    if rr:
+        reason += f"|gate={rr}"
+    send_trade_log(st, price, reason)
 
 
 def run_signal_pipeline() -> None:
@@ -145,9 +181,14 @@ def run_signal_pipeline() -> None:
         tp_trigger, tp_price, trail_level = "NONE", None, 0.0
 
         if current_state == STATE_HOLDING and tp_manager.is_active:
+            # Convert USD ATR to THB ATR before passing to TP manager
+            atr_48 = float(features_row.get("F_ATR_48", 0.0))
+            usd_close = float(features_row.get("usd_close", 32.4))
+            atr_thb = atr_48 * (15.244 / 31.1035) * usd_close if atr_48 > 0 else 0.0
+
             tp_trigger, tp_price, trail_level = tp_manager.update(
                 current_bid=features_row["hsh_close_bid"],
-                atr_48=features_row["F_ATR_48"],
+                atr_48=atr_thb,
                 current_score=inference_result["ranker_score"],
             )
             _save_tp_state_if_supported()
@@ -312,6 +353,11 @@ def run_signal_pipeline() -> None:
                 "xau_close": features_row["xau_close"],
             }
             notify_sell_signal(forced_gate_result, rationale_payload)
+            send_trade_log(
+                "SELL",
+                exit_bid_price,
+                f"FORCED_{tp_trigger}|score={inference_result['ranker_score']:.4f}|id={forced_signal_id}",
+            )
 
             tp_manager.reset()
             trading_log.warning(
@@ -356,6 +402,7 @@ def run_signal_pipeline() -> None:
             "atr_48": features_row["F_ATR_48"],
             "features_snap": signal_record["features_snap"],
         })
+        _send_model_signal_trade_log(gate_result, inference_result)
 
         # ─── Action & State Update ────────────────────────────────────────────
         if gate_result["passed"] and gate_result["signal_type"]:
@@ -381,7 +428,21 @@ def run_signal_pipeline() -> None:
                     )
                     return
 
-                # Signal exists in DB → FK-safe to close active trade.
+                # ── Guard: verify an OPEN trade actually exists before closing ──
+                # This prevents the error when state=HOLDING but no confirmed trade
+                # exists (e.g. BUY was sent as WAITING_CONFIRM but never confirmed).
+                open_trade_check = get_open_trade()
+                if not open_trade_check:
+                    trading_log.warning(
+                        "[SELL] ⚠️ SELL signal generated but NO OPEN trade found in "
+                        "v3_active_trades. Possible cause: BUY was never confirmed via UI. "
+                        "Auto-healing state → EMPTY. SELL signal logged but NOT executed."
+                    )
+                    set_state(STATE_EMPTY)
+                    tp_manager.reset()
+                    return
+
+                # Signal exists in DB and OPEN trade confirmed → FK-safe to close.
                 ok_close = close_open_trade(
                     exit_signal_id=signal_record.get("id"),
                     exit_bid=gate_result["hsh_bid"],
@@ -395,7 +456,6 @@ def run_signal_pipeline() -> None:
                         "Failed to close active trade. State was NOT changed.",
                     )
                     return
-
                 set_state(STATE_EMPTY)
                 tp_manager.reset()
                 notify_sell_signal(gate_result, rationale_payload)

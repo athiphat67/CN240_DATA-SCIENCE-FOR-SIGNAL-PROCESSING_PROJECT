@@ -13,6 +13,7 @@ from tests.conftest import (
 class TestBuySignalPendingConfirm:
     """When gate produces BUY, orchestrator must NOT change state."""
 
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_buy_signal")
     @patch("scheduler.orchestrator.insert_bar_log", return_value=True)
     @patch("scheduler.orchestrator.insert_signal", return_value=True)
@@ -27,9 +28,19 @@ class TestBuySignalPendingConfirm:
     @patch("scheduler.orchestrator.set_state")
     @patch("scheduler.orchestrator.get_open_trade", return_value=None)
     def test_buy_signal_stays_empty(
-        self, mock_get_trade, mock_set_state, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar, mock_notify_buy,
+        self,
+        mock_send_trade_log,
+        mock_notify_buy,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_set_state,
+        mock_get_trade,
     ):
         mock_candles.return_value = MagicMock()
         mock_features.return_value = MOCK_FEATURES_ROW.copy()
@@ -49,7 +60,9 @@ class TestBuySignalPendingConfirm:
 
         # Notify buy signal (WAITING CONFIRM)
         mock_notify_buy.assert_called_once()
+        mock_send_trade_log.assert_called_once()
 
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_buy_signal")
     @patch("scheduler.orchestrator.insert_bar_log", return_value=True)
     @patch("scheduler.orchestrator.insert_signal", return_value=True)
@@ -64,9 +77,19 @@ class TestBuySignalPendingConfirm:
     @patch("scheduler.orchestrator.close_open_trade")
     @patch("scheduler.orchestrator.get_open_trade", return_value=None)
     def test_buy_signal_no_trade_opened(
-        self, mock_get_trade, mock_close, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar, mock_notify_buy,
+        self,
+        mock_send_trade_log,
+        mock_notify_buy,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_close,
+        mock_get_trade,
     ):
         mock_candles.return_value = MagicMock()
         mock_features.return_value = MOCK_FEATURES_ROW.copy()
@@ -78,7 +101,9 @@ class TestBuySignalPendingConfirm:
 
         # No trade should be opened by the orchestrator on BUY signal
         mock_close.assert_not_called()
+        mock_send_trade_log.assert_called_once()
 
+    @patch("scheduler.orchestrator.send_trade_log")
     @patch("scheduler.orchestrator.notify_buy_signal")
     @patch("scheduler.orchestrator.insert_bar_log", return_value=True)
     @patch("scheduler.orchestrator.insert_signal", return_value=True)
@@ -92,9 +117,18 @@ class TestBuySignalPendingConfirm:
     @patch("scheduler.orchestrator.get_current_state", return_value="EMPTY")
     @patch("scheduler.orchestrator.get_open_trade", return_value=None)
     def test_buy_signal_tp_not_activated(
-        self, mock_get_trade, mock_get_state,
-        mock_candles, mock_features, mock_inference, mock_gate,
-        mock_payload, mock_insert_signal, mock_insert_bar, mock_notify_buy,
+        self,
+        mock_send_trade_log,
+        mock_notify_buy,
+        mock_insert_bar,
+        mock_insert_signal,
+        mock_payload,
+        mock_gate,
+        mock_inference,
+        mock_features,
+        mock_candles,
+        mock_get_state,
+        mock_get_trade,
     ):
         mock_candles.return_value = MagicMock()
         mock_features.return_value = MOCK_FEATURES_ROW.copy()
@@ -107,3 +141,4 @@ class TestBuySignalPendingConfirm:
         run_signal_pipeline()
 
         assert not tp_manager.is_active, "TP manager must NOT activate on BUY signal"
+        mock_send_trade_log.assert_called_once()

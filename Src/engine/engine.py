@@ -52,7 +52,7 @@ class WatcherConfig(BaseModel):
     period:                       str   = Field(default="1d",     description="Data period")
     interval:                     str   = Field(default="5m",     description="Candle interval")
     market_data_source:           str   = Field(default_factory=lambda: os.getenv("MARKET_DATA_SOURCE", "supabase_hsh_ig"), description="Market data source")
-    cooldown_minutes:             int   = Field(default=5,   ge=1,    description="Min minutes between AI triggers")
+    cooldown_minutes:             int   = Field(default=1,   ge=1,    description="Min minutes between AI triggers")
     min_price_step:               float = Field(default=5, gt=0.0,  description="Min THB/gram move to re-trigger")
     rsi_oversold:                 float = Field(default=30.0, ge=0,  le=50,  description="RSI oversold threshold")
     rsi_overbought:               float = Field(default=70.0, ge=50, le=100, description="RSI overbought threshold")

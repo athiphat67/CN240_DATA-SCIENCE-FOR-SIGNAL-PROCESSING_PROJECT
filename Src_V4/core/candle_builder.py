@@ -81,6 +81,8 @@ def _clean_and_localize(df: pd.DataFrame, price_cols: list) -> pd.DataFrame:
     return df
 
 
+
+
 def build_candles() -> pd.DataFrame:
     """
     [FIXED] Phase 1: เลียนแบบ app.py 100%

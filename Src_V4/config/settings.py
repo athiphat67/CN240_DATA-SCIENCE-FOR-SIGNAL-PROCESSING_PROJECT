@@ -51,10 +51,6 @@ VOL_WINDOW          = 144
 SPREAD_NORM_WINDOW  = 144
 
 # ─── Signal Gate Thresholds ───────────────────────────────────────────────────
-# GATE_SRVR_MIN           = 0.15
-# GATE_SPREAD_NORM_MAX    = 2.5
-# GATE_REGIME_REQUIRED    = 1
-# BUY_GATE_MODE           = os.getenv("BUY_GATE_MODE", "STRICT")  # STRICT | LIVE_RELAXED
 GATE_SRVR_MIN        = 0.0   # ปิด — srvr=0 เกิดจาก session ที่ยังไม่มี volume data
 GATE_SPREAD_NORM_MAX = 2.5   # คงเดิม
 GATE_REGIME_REQUIRED = 0     # ปิด — หรือใช้ LIVE_RELAXED
@@ -90,6 +86,8 @@ TRADE_LOG_API_KEY = os.getenv("TRADE_LOG_API_KEY", "")
 TP_ATR_MULTIPLIER       = 1.5   # Trail distance
 TP_BREAKEVEN_ATR_MULT   = 1.0   # Lock trail after this profit
 TP_SCORE_DROP_THRESH    = 0.15  # Early warning threshold
+TP_SL_ATR_MULT          = 1.5   # Stop loss multiplier
+TP_BE_FLOOR_OFFSET      = 2.0   # Breakeven floor offset
 
 # ─── Execution Confirmation ──────────────────────────────────────────────────
 REQUIRE_BUY_CONFIRM = os.getenv("REQUIRE_BUY_CONFIRM", "true").lower() == "true"

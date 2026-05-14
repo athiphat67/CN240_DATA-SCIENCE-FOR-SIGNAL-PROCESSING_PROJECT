@@ -1,11 +1,9 @@
 # tests/conftest.py
 """
 Shared fixtures for the HSH Gold ML Trader test suite.
-All Supabase/Discord calls are mocked — no real network traffic.
 
-This conftest pre-mocks heavy dependencies (apscheduler, gradio, httpx,
-supabase, xgboost, dotenv, pandas, numpy) so tests can import project modules
-even when those packages aren't installed in the test environment.
+Unit tests: heavy deps (apscheduler, gradio, httpx, xgboost) are mocked.
+Integration tests (test_snapshot_alignment.py): real supabase + real .env.
 """
 import os
 import sys
@@ -15,9 +13,15 @@ from unittest.mock import MagicMock
 from datetime import timezone, timedelta
 
 # ── Ensure project root is importable ─────────────────────────────────────────
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+_SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _SRC_ROOT)
 
-# ── Pre-set env vars BEFORE any project import ───────────────────────────────
+# ── Load REAL .env FIRST so SUPABASE_URL/KEY are available for integration tests
+# ── (unit tests can override these with setdefault after) ────────────────────
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(os.path.join(_SRC_ROOT, ".env"), override=False)
+
+# ── Pre-set fallback env vars for unit tests that don't need real DB ─────────
 os.environ.setdefault("DRY_RUN", "true")
 os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
 os.environ.setdefault("SUPABASE_KEY", "test-key")
@@ -41,14 +45,15 @@ class _GrContextMock(MagicMock):
         return instance
 
 
-# ── Stub out heavy third-party modules ────────────────────────────────────────
+# ── Stub out heavy third-party modules (unit tests only) ─────────────────────
+# NOTE: supabase and dotenv are NOT stubbed here — integration tests need the real packages.
 _STUB_MODULES = [
     "apscheduler", "apscheduler.schedulers", "apscheduler.schedulers.blocking",
     "apscheduler.triggers", "apscheduler.triggers.cron",
-    "gradio", "httpx",
-    "supabase",
+    "gradio",
+    # NOTE: httpx is NOT stubbed — supabase imports httpx.Timeout at package level
+    # NOTE: supabase is NOT stubbed — integration tests need real DB access
     "xgboost",
-    "dotenv",
 ]
 
 # Only stub pandas/numpy if they're not actually installed
@@ -88,8 +93,6 @@ for mod_name in _STUB_MODULES:
         elif mod_name == "xgboost":
             stub.XGBRanker = MagicMock
             stub.DMatrix = MagicMock
-        elif mod_name == "dotenv":
-            stub.load_dotenv = MagicMock()
         elif mod_name == "pandas":
             stub.DataFrame = MagicMock
             stub.Timestamp = MagicMock
