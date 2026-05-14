@@ -27,12 +27,11 @@ from db.supabase_writer import (
     insert_signal,
     insert_bar_log,
     get_open_trade,
-    close_open_trade,
-    mark_signal_execution,
+    get_latest_pending_sell_signal,
 )
 from notifier.discord_notifier import (
     notify_buy_signal,
-    notify_sell_signal,
+    notify_sell_pending,
     notify_heartbeat,
     notify_error,
     notify_dynamic_tp,
@@ -178,9 +177,25 @@ def run_signal_pipeline() -> None:
         sync_tp_state_from_db(features_row)
         current_state = get_current_state()
 
+        # ── Manual-confirm SELL guard ─────────────────────────────────────────
+        # If a pending SELL already exists (from gate SELL or forced exit on a
+        # previous bar that the user has not yet confirmed), skip TP evaluation
+        # and skip generating new SELL signals this bar. State stays HOLDING
+        # until the user confirms via confirm_trade_ui.py.
+        existing_pending_sell = None
+        if current_state == STATE_HOLDING:
+            existing_pending_sell = get_latest_pending_sell_signal()
+            if existing_pending_sell:
+                trading_log.info(
+                    f"[SELL] Pending SELL awaiting confirm "
+                    f"(id={existing_pending_sell.get('id')}, "
+                    f"status={existing_pending_sell.get('execution_status')}) — "
+                    f"TP eval and new SELL signals suppressed this bar."
+                )
+
         tp_trigger, tp_price, trail_level = "NONE", None, 0.0
 
-        if current_state == STATE_HOLDING and tp_manager.is_active:
+        if current_state == STATE_HOLDING and tp_manager.is_active and not existing_pending_sell:
             # Convert USD ATR to THB ATR before passing to TP manager
             atr_48 = float(features_row.get("F_ATR_48", 0.0))
             usd_close = float(features_row.get("usd_close", 32.4))
@@ -226,7 +241,9 @@ def run_signal_pipeline() -> None:
                     features_row["F_ATR_48"],
                 )
 
-        # 🚨 FORCED EXIT LOGIC: SL Hit / Trail Hit
+        # 🚨 FORCED EXIT → PENDING SELL: SL Hit / Trail Hit
+        # Manual-confirm mode: TP-triggered SELL now creates a PENDING_CONFIRM
+        # signal instead of auto-closing. User must confirm via UI.
         if tp_trigger in ("TRAIL_HIT", "SL_HIT"):
             if current_state != STATE_HOLDING or not tp_manager.is_active:
                 trading_log.warning(
@@ -243,10 +260,10 @@ def run_signal_pipeline() -> None:
             )
 
             system_log.info(
-                f"[TP] {reason_text} @ {exit_bid_price:.2f}. Forcing SELL signal."
+                f"[TP] {reason_text} @ {exit_bid_price:.2f}. Creating PENDING SELL signal."
             )
 
-            # 1. Build rationale first so DB record contains explanation.
+            # 1. Build rationale so DB record contains explanation.
             rationale_payload = build_trade_payload(
                 signal_type="SELL",
                 ranker_score=inference_result["ranker_score"],
@@ -257,13 +274,13 @@ def run_signal_pipeline() -> None:
                 state_before=STATE_HOLDING,
             )
             rationale_payload["rationale_text"] = (
-                f"🤖 **Auto-Exit Trigger:** {reason_text} @ `{exit_bid_price:,.2f}` THB\n\n"
+                f"🤖 **Auto-Exit Trigger:** {reason_text} @ `{exit_bid_price:,.2f}` THB "
+                f"— WAITING FOR USER CONFIRM\n\n"
                 f"{rationale_payload.get('rationale_text', '')}"
             )
             rationale_payload["execution_price"] = exit_bid_price
 
-            # 2. Insert forced SELL signal first.
-            # Required for audit trail and for active_trade.exit_signal_id FK.
+            # 2. Insert PENDING_CONFIRM SELL signal. Do NOT close trade or flip state.
             forced_sell_record = {
                 "id": forced_signal_id,
                 "bar_time": features_row["bar_time"],
@@ -282,55 +299,21 @@ def run_signal_pipeline() -> None:
                 "rationale_text": rationale_payload.get("rationale_text"),
                 "top_shap_features": rationale_payload.get("top_shap_features", {}),
                 "created_at": datetime.now(TZ).isoformat(),
-                "execution_status": "PENDING_AUTO_EXIT",
+                "execution_status": "PENDING_CONFIRM",
             }
 
             ok_insert = insert_signal(forced_sell_record)
             if not ok_insert:
                 trading_log.error(
-                    f"[TP] Failed to insert forced SELL signal {forced_signal_id}. "
-                    f"State was NOT changed."
+                    f"[TP] Failed to insert pending SELL signal {forced_signal_id}."
                 )
                 notify_error(
                     "Forced SELL",
-                    f"Failed to insert forced SELL signal {forced_signal_id}. State was NOT changed.",
+                    f"Failed to insert pending SELL signal {forced_signal_id}.",
                 )
                 return
 
-            # 3. Close active trade after forced SELL signal exists.
-            ok_close = close_open_trade(
-                exit_signal_id=forced_signal_id,
-                exit_bid=exit_bid_price,
-                exit_score=inference_result["ranker_score"],
-                reason=tp_trigger,
-            )
-            if not ok_close:
-                trading_log.error(
-                    f"[TP] Failed to close active trade for {tp_trigger}. "
-                    f"State was NOT changed. Bid={exit_bid_price:.2f}"
-                )
-                notify_error(
-                    "Forced SELL",
-                    f"Failed to close active trade for {tp_trigger}. State was NOT changed.",
-                )
-                return
-
-            ok_mark = mark_signal_execution(
-                forced_signal_id,
-                "AUTO_EXITED",
-                exit_bid_price,
-                note=tp_trigger,
-            )
-            if not ok_mark:
-                trading_log.warning(
-                    f"[TP] Forced SELL closed trade but failed to mark signal "
-                    f"{forced_signal_id} as AUTO_EXITED"
-                )
-
-            # 4. Flip state after signal exists and active trade is closed.
-            set_state(STATE_EMPTY)
-
-            # 5. Forced exit bar log. Forced exit always exits from HOLDING.
+            # 3. Forced exit bar log. Bar exits while still HOLDING.
             insert_bar_log({
                 "bar_time": features_row["bar_time"],
                 "session": features_row["session"],
@@ -344,7 +327,9 @@ def run_signal_pipeline() -> None:
                 "features_snap": inference_result["features_snap"],
             })
 
-            # 6. Notify and reset.
+            # 4. Notify user. State stays HOLDING; TP manager stays active.
+            # The pending-SELL guard at the top of the pipeline will suppress
+            # duplicate TP triggers on subsequent bars until user confirms.
             forced_gate_result = {
                 "bar_time": features_row["bar_time"],
                 "session": features_row["session"],
@@ -352,20 +337,26 @@ def run_signal_pipeline() -> None:
                 "hsh_bid": exit_bid_price,
                 "xau_close": features_row["xau_close"],
             }
-            notify_sell_signal(forced_gate_result, rationale_payload)
+            notify_sell_pending(
+                forced_gate_result,
+                rationale_payload,
+                trigger=f"FORCED_{tp_trigger}",
+                signal_id=forced_signal_id,
+            )
             send_trade_log(
                 "SELL",
                 exit_bid_price,
-                f"FORCED_{tp_trigger}|score={inference_result['ranker_score']:.4f}|id={forced_signal_id}",
+                f"PENDING_FORCED_{tp_trigger}|score={inference_result['ranker_score']:.4f}|id={forced_signal_id}",
             )
 
-            tp_manager.reset()
             trading_log.warning(
                 f"\n{'=' * 60}\n"
-                f"  🚨 [EXIT] FORCED SELL — {tp_trigger}\n"
+                f"  🟡 [PENDING SELL] FORCED — {tp_trigger}\n"
                 f"  Bid Price : {exit_bid_price:,.2f} THB\n"
                 f"  Score     : {inference_result['ranker_score']:.4f}\n"
                 f"  Bar Time  : {features_row['bar_time']}\n"
+                f"  Signal ID : {forced_signal_id}\n"
+                f"  Status    : WAITING USER CONFIRM\n"
                 f"{'=' * 60}"
             )
             return
@@ -386,7 +377,25 @@ def run_signal_pipeline() -> None:
             # Rich manual-confirm: BUY signal does not change state yet.
             signal_record["execution_status"] = "PENDING_CONFIRM"
         elif gate_result["passed"] and gate_result["signal_type"] == "SELL":
-            signal_record["execution_status"] = "CONFIRMED"
+            # Manual-confirm: SELL also waits for user confirmation.
+            signal_record["execution_status"] = "PENDING_CONFIRM"
+
+        # Dedup: pending SELL was already checked at top of pipeline. If one exists,
+        # skip writing a duplicate gate SELL signal (still log the bar as HOLD).
+        if existing_pending_sell and gate_result["passed"] and gate_result["signal_type"] == "SELL":
+            insert_bar_log({
+                "bar_time": features_row["bar_time"],
+                "session": features_row["session"],
+                "state_at_bar": gate_result["state_before"],
+                "ranker_score": inference_result["ranker_score"],
+                "signal_passed": gate_result["passed"],
+                "signal_type": "HOLD",
+                "hsh_close_ask": features_row["hsh_close_ask"],
+                "hsh_close_bid": features_row["hsh_close_bid"],
+                "atr_48": features_row["F_ATR_48"],
+                "features_snap": signal_record["features_snap"],
+            })
+            return
 
         # ─── P6: Write to Supabase ────────────────────────────────────────────
         ok_signal_insert = insert_signal(signal_record)
@@ -417,49 +426,41 @@ def run_signal_pipeline() -> None:
                 )
 
             elif signal_type == "SELL":
+                # Manual-confirm mode: do NOT close active trade or flip state here.
+                # State stays HOLDING and TP manager stays active until user confirms
+                # via confirm_trade_ui.py. The forced-exit guard above prevents
+                # duplicate pending SELL signals from being inserted each bar.
                 if not ok_signal_insert:
                     trading_log.error(
-                        "[SELL] insert_signal failed — aborting SELL. "
-                        "State was NOT changed."
+                        "[SELL] insert_signal failed — pending SELL was NOT created."
                     )
                     notify_error(
                         "Model SELL",
-                        "Failed to insert SELL signal. State was NOT changed.",
+                        "Failed to insert pending SELL signal.",
                     )
                     return
 
-                # ── Guard: verify an OPEN trade actually exists before closing ──
-                # This prevents the error when state=HOLDING but no confirmed trade
-                # exists (e.g. BUY was sent as WAITING_CONFIRM but never confirmed).
+                # Guard: if state=HOLDING but no open trade exists (BUY never confirmed),
+                # warn but don't touch state — user must reconcile via UI.
                 open_trade_check = get_open_trade()
                 if not open_trade_check:
                     trading_log.warning(
-                        "[SELL] ⚠️ SELL signal generated but NO OPEN trade found in "
-                        "v3_active_trades. Possible cause: BUY was never confirmed via UI. "
-                        "Auto-healing state → EMPTY. SELL signal logged but NOT executed."
+                        "[SELL] ⚠️ Pending SELL generated but NO OPEN trade found in "
+                        "v3_active_trades. State=HOLDING but no position. "
+                        "Please reconcile via UI (Force Reset or re-confirm BUY)."
                     )
-                    set_state(STATE_EMPTY)
-                    tp_manager.reset()
-                    return
 
-                # Signal exists in DB and OPEN trade confirmed → FK-safe to close.
-                ok_close = close_open_trade(
-                    exit_signal_id=signal_record.get("id"),
-                    exit_bid=gate_result["hsh_bid"],
-                    exit_score=inference_result["ranker_score"],
-                    reason="MODEL_SELL",
+                signal_id = signal_record.get("id")
+                notify_sell_pending(
+                    gate_result,
+                    rationale_payload,
+                    trigger="GATE_SELL",
+                    signal_id=signal_id,
                 )
-                if not ok_close:
-                    trading_log.error("[SELL] Failed to close active trade. State was NOT changed.")
-                    notify_error(
-                        "Model SELL",
-                        "Failed to close active trade. State was NOT changed.",
-                    )
-                    return
-                set_state(STATE_EMPTY)
-                tp_manager.reset()
-                notify_sell_signal(gate_result, rationale_payload)
-                trading_log.info(f"SELL signal sent | score={_last_score:.4f}")
+                trading_log.info(
+                    f"SELL signal sent — WAITING_CONFIRM | score={_last_score:.4f} | "
+                    f"signal_id={signal_id}"
+                )
 
         else:
             trading_log.info(

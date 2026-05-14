@@ -62,6 +62,31 @@ def notify_sell_signal(gate_result: dict, rationale_payload: Optional[dict] = No
         msg += f"📉 **Rationale:** {rationale_payload['rationale_text']}"
     send_discord(msg)
 
+
+def notify_sell_pending(
+    gate_result: dict,
+    rationale_payload: Optional[dict] = None,
+    trigger: str = "GATE_SELL",
+    signal_id: Optional[str] = None,
+) -> None:
+    """Pending SELL signal — waiting for user manual confirm in UI."""
+    mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
+    bid     = gate_result.get("hsh_bid", 0) or 0
+    sig_line = f"Signal ID   : {signal_id}\n" if signal_id else ""
+    msg = (
+        f"{mention}\n🟡 **PENDING SELL** — `{gate_result['bar_time']}`\n```\n"
+        f"Trigger     : {trigger}\n"
+        f"{sig_line}"
+        f"Session     : {gate_result['session']}\n"
+        f"Score       : {gate_result['ranker_score']:.4f}\n"
+        f"HSH Bid     : {bid:,.2f} THB  ← ราคาขายแนะนำ\n"
+        f"XAU/USD     : {gate_result.get('xau_close', 0):.2f}\n```\n"
+        f"⚠️ **Status: WAITING CONFIRM** — Execute ที่ HSH แล้วกด Confirm SELL ใน UI\n"
+    )
+    if rationale_payload and rationale_payload.get("rationale_text"):
+        msg += f"📉 **Rationale:** {rationale_payload['rationale_text']}"
+    send_discord(msg)
+
 def notify_heartbeat(state: str, last_bar: str, score: float) -> None:
     msg = (
         f"💓 **Heartbeat** — บอททำงานปกติ\n"

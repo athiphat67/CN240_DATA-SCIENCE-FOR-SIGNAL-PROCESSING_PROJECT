@@ -126,6 +126,24 @@ def get_latest_pending_buy_signal() -> dict | None:
     return res.data[0] if res.data else None
 
 
+def get_latest_pending_sell_signal() -> dict | None:
+    if DRY_RUN:
+        return None
+
+    res = (
+        get_supabase_client()
+        .table(SIGNALS_TABLE)
+        .select("*")
+        .eq("signal_type", "SELL")
+        .eq("passed", True)
+        .in_("execution_status", ["PENDING_CONFIRM", "PENDING_AUTO_EXIT", "SIGNAL_ONLY"])
+        .order("bar_time", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def mark_signal_execution(
     signal_id: str,
     status: str,
