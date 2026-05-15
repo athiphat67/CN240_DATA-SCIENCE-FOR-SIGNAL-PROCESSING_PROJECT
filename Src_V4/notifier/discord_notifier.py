@@ -87,6 +87,25 @@ def notify_sell_pending(
         msg += f"📉 **Rationale:** {rationale_payload['rationale_text']}"
     send_discord(msg)
 
+def notify_hold(
+    bar_time: str,
+    state: str,
+    score: float,
+    reject_reason: str,
+    hsh_bid: float,
+    hsh_ask: float,
+    pending_sell_id: Optional[str] = None,
+) -> None:
+    """แจ้งเตือนทุก bar ที่ตัดสินใจเป็น HOLD (รวม dedup pending SELL)."""
+    pending_line = f" · pending=`{pending_sell_id}`" if pending_sell_id else ""
+    msg = (
+        f"⏸️ **HOLD** `{bar_time}`\n"
+        f"State: `{state}` · Score: `{score:.4f}` · Reject: `{reject_reason or 'none'}`\n"
+        f"Bid: `{hsh_bid:,.2f}` · Ask: `{hsh_ask:,.2f}`{pending_line}"
+    )
+    send_discord(msg)
+
+
 def notify_heartbeat(state: str, last_bar: str, score: float) -> None:
     msg = (
         f"💓 **Heartbeat** — บอททำงานปกติ\n"

@@ -17,6 +17,7 @@ from config.settings import (
     TP_BE_FLOOR_OFFSET,
     SIGNAL_THRESHOLD,
     GATE_SPREAD_NORM_MAX,
+    FORCE_SELL_BAR_TIMES_BKK,
 )
 from core.candle_builder import build_candles
 from core.feature_engine import compute_features
@@ -39,6 +40,7 @@ from notifier.discord_notifier import (
     notify_error,
     notify_dynamic_tp,
     notify_sl_recovered,
+    notify_hold,
 )
 from notifier.trade_log_api import send_trade_log
 from rationale.generator import build_trade_payload
@@ -136,6 +138,15 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
         trading_log.info("[TP Sync] TP manager activated from active trade")
 
 
+def _is_force_sell_bar(bar_time_iso: str) -> bool:
+    """Return True if bar_time (BKK ISO like '2026-05-15T11:50:00+07:00')
+    matches any configured session-end force-sell time."""
+    try:
+        return bar_time_iso[11:16] in FORCE_SELL_BAR_TIMES_BKK
+    except Exception:
+        return False
+
+
 def _send_model_signal_trade_log(gate_result: dict, inference_result: dict) -> None:
     """Post gate output (BUY / SELL / HOLD) to the external trade log API each bar."""
     st = gate_result.get("signal_type") or "HOLD"
@@ -228,7 +239,12 @@ def run_signal_pipeline() -> None:
 
         tp_trigger, tp_price, trail_level = "NONE", None, 0.0
 
-        if current_state == STATE_HOLDING and tp_manager.is_active and not existing_pending_sell:
+        # NOTE: Always run TP eval while HOLDING — even when a pending SELL exists.
+        # This lets us detect SL_HIT/TRAIL_HIT every bar so the forced-exit
+        # block can re-notify (Discord + TradeLog SELL) as long as bid stays
+        # past the SL/Trail threshold. If bid recovers, the trigger drops back
+        # to TP_UPDATED/NONE and the user sees HOLD again.
+        if current_state == STATE_HOLDING and tp_manager.is_active:
             # Convert USD ATR to THB ATR before passing to TP manager
             atr_48 = float(features_row.get("F_ATR_48", 0.0))
             usd_close = float(features_row.get("usd_close", 32.4))
@@ -317,10 +333,27 @@ def run_signal_pipeline() -> None:
                     features_row["F_ATR_48"],
                 )
 
-        # 🚨 FORCED EXIT → PENDING SELL: SL Hit / Trail Hit
-        # Manual-confirm mode: TP-triggered SELL now creates a PENDING_CONFIRM
-        # signal instead of auto-closing. User must confirm via UI.
-        if tp_trigger in ("TRAIL_HIT", "SL_HIT"):
+        # ── Session-end forced SELL ──────────────────────────────────────────
+        # At configured BKK bar times (FORCE_SELL_BAR_TIMES_BKK, e.g. "11:50"),
+        # emit a PENDING SELL regardless of TP/SL state to flatten before the
+        # session transition. Skipped if a pending SELL already exists.
+        if (
+            current_state == STATE_HOLDING
+            and tp_manager.is_active
+            and not existing_pending_sell
+            and tp_trigger not in ("TRAIL_HIT", "SL_HIT")
+            and _is_force_sell_bar(features_row["bar_time"])
+        ):
+            tp_trigger = "SESSION_END_FORCE"
+            trading_log.warning(
+                f"[Session End] 🕒 Force SELL triggered at bar {features_row['bar_time']} "
+                f"(matched FORCE_SELL_BAR_TIMES_BKK)"
+            )
+
+        # 🚨 FORCED EXIT → PENDING SELL: SL Hit / Trail Hit / Session-end force
+        # Manual-confirm mode: forced SELL creates a PENDING_CONFIRM signal
+        # instead of auto-closing. User must confirm via UI.
+        if tp_trigger in ("TRAIL_HIT", "SL_HIT", "SESSION_END_FORCE"):
             if current_state != STATE_HOLDING or not tp_manager.is_active:
                 trading_log.warning(
                     f"[TP] Ignored {tp_trigger} because state={current_state}, "
@@ -328,8 +361,62 @@ def run_signal_pipeline() -> None:
                 )
                 return
 
-            reason_text = "Trailing Stop Hit" if tp_trigger == "TRAIL_HIT" else "Stop Loss Hit"
+            reason_text = {
+                "TRAIL_HIT": "Trailing Stop Hit",
+                "SL_HIT": "Stop Loss Hit",
+                "SESSION_END_FORCE": "Session-End Force Sell (before noon break)",
+            }[tp_trigger]
             exit_bid_price = features_row["hsh_close_bid"]
+
+            # ── Repeat-notify path ──────────────────────────────────────────
+            # Pending SELL already exists and price is STILL past SL/Trail
+            # (or session-end re-triggered). Don't insert a duplicate signal;
+            # just re-emit Discord + TradeLog SELL each bar so the user keeps
+            # seeing the exit signal until they confirm at the UI.
+            if existing_pending_sell and tp_trigger in ("TRAIL_HIT", "SL_HIT"):
+                pending_id = existing_pending_sell.get("id", "UNKNOWN")
+                insert_bar_log({
+                    "bar_time": features_row["bar_time"],
+                    "session": features_row["session"],
+                    "state_at_bar": STATE_HOLDING,
+                    "ranker_score": inference_result["ranker_score"],
+                    "signal_passed": True,
+                    "signal_type": "SELL",
+                    "hsh_close_ask": features_row["hsh_close_ask"],
+                    "hsh_close_bid": exit_bid_price,
+                    "atr_48": features_row["F_ATR_48"],
+                    "features_snap": inference_result["features_snap"],
+                })
+                repeat_gate_result = {
+                    "bar_time": features_row["bar_time"],
+                    "session": features_row["session"],
+                    "ranker_score": inference_result["ranker_score"],
+                    "hsh_bid": exit_bid_price,
+                    "xau_close": features_row["xau_close"],
+                }
+                repeat_rationale = {
+                    "rationale_text": (
+                        f"🔁 **Still past {reason_text}** @ `{exit_bid_price:,.2f}` THB — "
+                        f"pending SELL `{pending_id}` still awaiting your confirmation at the UI."
+                    )
+                }
+                notify_sell_pending(
+                    repeat_gate_result,
+                    repeat_rationale,
+                    trigger=f"REPEAT_{tp_trigger}",
+                    signal_id=pending_id,
+                )
+                send_trade_log(
+                    "SELL",
+                    exit_bid_price,
+                    f"REPEAT_{tp_trigger}|score={inference_result['ranker_score']:.4f}|pending_id={pending_id}",
+                )
+                trading_log.warning(
+                    f"[Repeat SELL] 🔁 Still past {tp_trigger} @ {exit_bid_price:,.2f} — "
+                    f"re-notifying pending {pending_id}"
+                )
+                return
+
             forced_signal_id = (
                 f"tp_{features_row['bar_time'][:19].replace('-', '').replace(':', '').replace('T', '_')}_"
                 f"{uuid.uuid4().hex[:6]}"
@@ -471,6 +558,21 @@ def run_signal_pipeline() -> None:
                 "atr_48": features_row["F_ATR_48"],
                 "features_snap": signal_record["features_snap"],
             })
+            send_trade_log(
+                "HOLD",
+                features_row["hsh_close_bid"],
+                f"DEDUP_PENDING_SELL|score={inference_result['ranker_score']:.4f}|"
+                f"pending_id={existing_pending_sell.get('id')}",
+            )
+            notify_hold(
+                bar_time=features_row["bar_time"],
+                state=gate_result["state_before"],
+                score=inference_result["ranker_score"],
+                reject_reason="dedup_pending_sell",
+                hsh_bid=features_row["hsh_close_bid"],
+                hsh_ask=features_row["hsh_close_ask"],
+                pending_sell_id=existing_pending_sell.get("id"),
+            )
             return
 
         # ─── P6: Write to Supabase ────────────────────────────────────────────
@@ -542,6 +644,14 @@ def run_signal_pipeline() -> None:
             trading_log.info(
                 f"HOLD | state={_last_state} | score={_last_score:.4f} "
                 f"| reject={gate_result.get('reject_reason')}"
+            )
+            notify_hold(
+                bar_time=features_row["bar_time"],
+                state=gate_result["state_before"],
+                score=inference_result["ranker_score"],
+                reject_reason=gate_result.get("reject_reason") or "",
+                hsh_bid=features_row["hsh_close_bid"],
+                hsh_ask=features_row["hsh_close_ask"],
             )
 
     except Exception as e:
