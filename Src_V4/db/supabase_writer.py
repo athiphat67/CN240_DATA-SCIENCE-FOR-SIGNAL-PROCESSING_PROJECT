@@ -4,7 +4,12 @@ import time
 import logging
 import supabase
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# Pending signals older than this are considered stale and never returned.
+# Forces signals to be confirmed within the freshness window, otherwise
+# they roll off via EXPIRED status (see expire_stale_pending_signals).
+PENDING_FRESHNESS_HOURS = 2
 from typing import Any, Tuple
 from supabase import create_client, Client
 from config.settings import (
@@ -108,6 +113,10 @@ def get_signal_by_id(signal_id: str) -> dict | None:
     return res.data[0] if res.data else None
 
 
+def _freshness_cutoff_iso() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=PENDING_FRESHNESS_HOURS)).isoformat()
+
+
 def get_latest_pending_buy_signal() -> dict | None:
     if DRY_RUN:
         return None
@@ -119,6 +128,7 @@ def get_latest_pending_buy_signal() -> dict | None:
         .eq("signal_type", "BUY")
         .eq("passed", True)
         .in_("execution_status", ["PENDING_CONFIRM", "SIGNAL_ONLY"])
+        .gte("bar_time", _freshness_cutoff_iso())
         .order("bar_time", desc=True)
         .limit(1)
         .execute()
@@ -137,6 +147,7 @@ def get_latest_pending_sell_signal() -> dict | None:
         .eq("signal_type", "SELL")
         .eq("passed", True)
         .in_("execution_status", ["PENDING_CONFIRM", "PENDING_AUTO_EXIT", "SIGNAL_ONLY"])
+        .gte("bar_time", _freshness_cutoff_iso())
         .order("bar_time", desc=True)
         .limit(1)
         .execute()

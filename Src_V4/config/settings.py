@@ -97,4 +97,14 @@ SIGNALS_TABLE       = os.getenv("SIGNALS_TABLE", "v3_signals")
 BAR_LOGS_TABLE      = os.getenv("BAR_LOGS_TABLE", "v3_bar_logs")
 SYSTEM_STATE_TABLE  = os.getenv("SYSTEM_STATE_TABLE", "v3_system_state")
 ACTIVE_TRADES_TABLE = os.getenv("ACTIVE_TRADES_TABLE", "v3_active_trades")
-TP_SL_ATR_MULT          = 1.0   # Stop loss multiplier
+
+# ─── Session-End Force SELL ──────────────────────────────────────────────────
+# Bar times (BKK, "HH:MM") that force-emit a PENDING SELL when state=HOLDING,
+# regardless of TP/SL/gate decisions. Used to flatten position before session
+# transitions (e.g. 11:50 = right before noon break). Each entry must match
+# the bar grid (every :00,:10,:20,:30,:40,:50).
+FORCE_SELL_BAR_TIMES_BKK = [
+    "11:50",  # ก่อนหมด Morning session (12:00)
+    "17:50",  # ก่อนหมด Noon/Afternoon session (18:00)
+    "01:50",  # ก่อนหมด Late-night session (02:00 dead-zone)
+]
