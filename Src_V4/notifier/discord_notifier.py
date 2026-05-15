@@ -62,6 +62,50 @@ def notify_sell_signal(gate_result: dict, rationale_payload: Optional[dict] = No
         msg += f"📉 **Rationale:** {rationale_payload['rationale_text']}"
     send_discord(msg)
 
+
+def notify_sell_pending(
+    gate_result: dict,
+    rationale_payload: Optional[dict] = None,
+    trigger: str = "GATE_SELL",
+    signal_id: Optional[str] = None,
+) -> None:
+    """Pending SELL signal — waiting for user manual confirm in UI."""
+    mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
+    bid     = gate_result.get("hsh_bid", 0) or 0
+    sig_line = f"Signal ID   : {signal_id}\n" if signal_id else ""
+    msg = (
+        f"{mention}\n🟡 **PENDING SELL** — `{gate_result['bar_time']}`\n```\n"
+        f"Trigger     : {trigger}\n"
+        f"{sig_line}"
+        f"Session     : {gate_result['session']}\n"
+        f"Score       : {gate_result['ranker_score']:.4f}\n"
+        f"HSH Bid     : {bid:,.2f} THB  ← ราคาขายแนะนำ\n"
+        f"XAU/USD     : {gate_result.get('xau_close', 0):.2f}\n```\n"
+        f"⚠️ **Status: WAITING CONFIRM** — Execute ที่ HSH แล้วกด Confirm SELL ใน UI\n"
+    )
+    if rationale_payload and rationale_payload.get("rationale_text"):
+        msg += f"📉 **Rationale:** {rationale_payload['rationale_text']}"
+    send_discord(msg)
+
+def notify_hold(
+    bar_time: str,
+    state: str,
+    score: float,
+    reject_reason: str,
+    hsh_bid: float,
+    hsh_ask: float,
+    pending_sell_id: Optional[str] = None,
+) -> None:
+    """แจ้งเตือนทุก bar ที่ตัดสินใจเป็น HOLD (รวม dedup pending SELL)."""
+    pending_line = f" · pending=`{pending_sell_id}`" if pending_sell_id else ""
+    msg = (
+        f"⏸️ **HOLD** `{bar_time}`\n"
+        f"State: `{state}` · Score: `{score:.4f}` · Reject: `{reject_reason or 'none'}`\n"
+        f"Bid: `{hsh_bid:,.2f}` · Ask: `{hsh_ask:,.2f}`{pending_line}"
+    )
+    send_discord(msg)
+
+
 def notify_heartbeat(state: str, last_bar: str, score: float) -> None:
     msg = (
         f"💓 **Heartbeat** — บอททำงานปกติ\n"
@@ -119,6 +163,22 @@ def notify_buy_confirmed(signal_id: str, price: float, note: str = "") -> None:
         f"Executed Ask: `{price:,.2f}` THB\n"
         f"State → `HOLDING`\n"
         f"{note}"
+    )
+
+
+def notify_sl_recovered(
+    bar_time: str,
+    signal_id: str,
+    score: float,
+    bid: float,
+) -> None:
+    """Pending SL exit cancelled because model score bounced back."""
+    send_discord(
+        f"✅ **SL RECOVERED** — `{bar_time}`\n"
+        f"```\nSignal ID   : {signal_id}\n"
+        f"Score       : {score:.4f}  ← momentum returned\n"
+        f"HSH Bid     : {bid:,.2f} THB\n```\n"
+        f"Pending SELL cancelled — ยังถือต่อ"
     )
 
 

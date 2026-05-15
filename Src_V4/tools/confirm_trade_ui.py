@@ -29,6 +29,7 @@ from config.settings import STATE_EMPTY, STATE_HOLDING, SUPABASE_URL, SUPABASE_K
 from core.state_manager import get_current_state, set_state
 from db.supabase_writer import (
     get_latest_pending_buy_signal,
+    get_latest_pending_sell_signal,
     mark_signal_execution,
     open_trade_from_signal,
     close_open_trade,
@@ -52,53 +53,65 @@ def _get_supabase():
 # Data Fetchers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _format_pending(s: dict | None, signal_type: str) -> tuple:
+    """Format pending signal dict into 7 display fields.
+
+    Returns: (signal_id, sig_label, bar_time, ask, bid, reason/status, rationale)
+    """
+    if not s:
+        return ("-", f"ไม่พบ PENDING {signal_type}", "-", "-", "-", "-", "-")
+
+    signal_id = s.get("id", "-")
+    bar_time  = s.get("bar_time", "-")
+    sig_type  = s.get("signal_type", signal_type)
+    score     = float(s.get("ranker_score", 0) or 0)
+    reason    = s.get("execution_status") or "PENDING_CONFIRM"
+    ask       = s.get("hsh_ask_price")
+    bid       = s.get("hsh_bid_price")
+    session   = s.get("session", "-")
+    rationale = s.get("rationale_text", "-")
+    reject    = s.get("reject_reason")
+
+    label_parts = [f"⏳ PENDING {sig_type}", f"score={score:.4f}", session]
+    if reject and reject.startswith("FORCED_BY_"):
+        label_parts.append(f"🤖 {reject.replace('FORCED_BY_', '')}")
+    sig_label = " | ".join(label_parts)
+
+    ask_str = f"{float(ask):,.2f} THB" if ask not in (None, "-") else "-"
+    bid_str = f"{float(bid):,.2f} THB" if bid not in (None, "-") else "-"
+
+    return (
+        str(signal_id),
+        sig_label,
+        str(bar_time),
+        ask_str,
+        bid_str,
+        str(reason),
+        str(rationale),
+    )
+
+
 def fetch_dashboard():
-    """ดึงข้อมูล State + Signal ล่าสุด"""
+    """ดึงข้อมูล State + Pending BUY + Pending SELL"""
     try:
         now_str = datetime.now(TZ_BKK).strftime("%H:%M:%S")
 
-        # ── State ──────────────────────────────────────────────────────────
         current_state = get_current_state()
-        state_icon    = "🟢 HOLDING" if current_state == STATE_HOLDING else "⚪ EMPTY"
+        state_icon = "🟢 HOLDING" if current_state == STATE_HOLDING else "⚪ EMPTY"
 
-        # ── Latest Pending BUY ──────────────────────────────────────────────
-        s = get_latest_pending_buy_signal()
-
-        if not s:
-            return (
-                state_icon, current_state,
-                "-",
-                "ไม่พบ PENDING BUY", "-", "-", "-", "-", "-",
-                f"✅ โหลดสำเร็จ | {now_str}"
-            )
-
-        signal_id   = s.get("id", "-")
-        bar_time    = s.get("bar_time", "-")
-        sig_type    = s.get("signal_type", "-")
-        score       = float(s.get("ranker_score", 0))
-        passed      = s.get("passed", False)
-        reason      = s.get("execution_status") or "PENDING_CONFIRM"
-        ask         = s.get("hsh_ask_price", "-")
-        bid         = s.get("hsh_bid_price", "-")
-        session     = s.get("session", "-")
-        rationale   = s.get("rationale_text", "-")
-
-        sig_label = f"⏳ PENDING {sig_type} | score={score:.4f} | {session}"
+        buy_fields  = _format_pending(get_latest_pending_buy_signal(), "BUY")
+        sell_fields = _format_pending(get_latest_pending_sell_signal(), "SELL")
 
         return (
             state_icon, current_state,
-            str(signal_id),
-            sig_label,
-            str(bar_time),
-            f"{float(ask):,.2f} THB" if ask != "-" else "-",
-            f"{float(bid):,.2f} THB" if bid != "-" else "-",
-            str(reason),
-            str(rationale),
-            f"✅ โหลดสำเร็จ | {now_str}"
+            *buy_fields,
+            *sell_fields,
+            f"✅ โหลดสำเร็จ | {now_str}",
         )
 
     except Exception as e:
-        return ("❌ Error", "UNKNOWN", "-", str(e), "-", "-", "-", "-", "-", f"❌ {e}")
+        err = ("-", f"❌ {e}", "-", "-", "-", "-", "-")
+        return ("❌ Error", "UNKNOWN", *err, *err, f"❌ {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,8 +245,48 @@ def confirm_buy(price_str: str, signal_id: str):
         return f"❌ Error: {e}"
 
 
-def confirm_sell(price_str: str):
-    """ยืนยัน SELL → State: EMPTY"""
+def _create_manual_sell_signal(price: float) -> dict:
+    """สร้าง manual SELL signal row ใน v3_signals (ใช้เมื่อไม่มี pending SELL จาก model)."""
+    now_str = datetime.now(TZ_BKK).strftime("%Y%m%d_%H%M%S")
+    signal_id = f"manual_sell_{now_str}"
+
+    manual_sell_record = {
+        "id": signal_id,
+        "bar_time": datetime.now(TZ_BKK).isoformat(),
+        "session": "Manual",
+        "signal_type": "SELL",
+        "ranker_score": 0.0,
+        "state_before": STATE_HOLDING,
+        "hsh_ask_price": None,
+        "hsh_bid_price": price,
+        "xau_price": None,
+        "atr_at_signal": None,
+        "passed": True,
+        "reject_reason": None,
+        "dry_run": False,
+        "features_snap": {},
+        "rationale_text": "Manual SELL — exited outside model signal",
+        "top_shap_features": {},
+        "execution_status": "CONFIRMED",
+        "confirmed_price": price,
+        "confirmed_at": datetime.now(TZ_BKK).isoformat(),
+        "created_at": datetime.now(TZ_BKK).isoformat(),
+    }
+
+    ok = insert_signal(manual_sell_record)
+    if not ok:
+        raise RuntimeError(f"Failed to insert manual SELL signal {signal_id}")
+
+    return manual_sell_record
+
+
+def confirm_sell(price_str: str, signal_id: str):
+    """
+    ยืนยัน SELL → State: EMPTY
+    รองรับ 2 กรณี:
+      A) มี PENDING SELL signal จาก model (gate SELL หรือ forced exit) → ใช้ signal นั้น
+      B) ไม่มี signal / ขายเองมือ → สร้าง manual signal แล้วปิด trade
+    """
     try:
         if not price_str.strip():
             return "❌ กรุณากรอกราคาที่ Execute จริง"
@@ -246,51 +299,65 @@ def confirm_sell(price_str: str):
         if current == STATE_EMPTY:
             return "⚠️ State เป็น EMPTY อยู่แล้ว — ไม่มี Position ที่จะปิด"
 
-        manual_sell_id = f"manual_sell_{datetime.now(TZ_BKK).strftime('%Y%m%d_%H%M%S')}"
+        is_manual = False
 
-        manual_sell_record = {
-            "id": manual_sell_id,
-            "bar_time": datetime.now(TZ_BKK).isoformat(),
-            "session": "Manual",
-            "signal_type": "SELL",
-            "ranker_score": 0.0,
-            "state_before": STATE_HOLDING,
-            "hsh_ask_price": None,
-            "hsh_bid_price": price,
-            "xau_price": None,
-            "atr_at_signal": None,
-            "passed": True,
-            "reject_reason": None,
-            "dry_run": False,
-            "features_snap": {},
-            "rationale_text": "Manual SELL confirmed from confirm_trade_ui.py",
-            "top_shap_features": {},
-            "execution_status": "CONFIRMED",
-            "confirmed_price": price,
-            "confirmed_at": datetime.now(TZ_BKK).isoformat(),
-            "created_at": datetime.now(TZ_BKK).isoformat(),
-        }
+        # ── หา signal ที่จะใช้ ────────────────────────────────────────────
+        if not signal_id or signal_id == "-":
+            s = get_latest_pending_sell_signal()
+            if not s:
+                # ไม่มี pending SELL signal → สร้าง manual signal แทน
+                s = _create_manual_sell_signal(price)
+                is_manual = True
+        else:
+            s = get_signal_by_id(signal_id)
+            if not s:
+                return f"❌ ไม่พบ Signal ID: {signal_id}"
 
-        ok_insert = insert_signal(manual_sell_record)
-        if not ok_insert:
-            return "❌ Failed to insert manual SELL signal. State was NOT changed."
+        # ── Validate (เฉพาะ signal จาก model เท่านั้น ไม่ validate manual) ──
+        if not is_manual:
+            if s.get("signal_type") != "SELL":
+                return "❌ This signal is not a SELL signal."
+            if not s.get("passed"):
+                return "❌ This SELL signal did not pass the gate."
+            execution_status = s.get("execution_status")
+            valid_statuses = ("PENDING_CONFIRM", "PENDING_AUTO_EXIT", "SIGNAL_ONLY", None)
+            if execution_status not in valid_statuses:
+                return f"❌ This signal is not pending anymore. Current status: {execution_status}"
+
+        # ── ปิด active trade ──────────────────────────────────────────────
+        reject_reason = (s.get("reject_reason") or "").upper()
+        if is_manual:
+            close_reason = "MANUAL_SELL_CONFIRMED"
+        elif reject_reason.startswith("FORCED_BY_"):
+            # Path A: trailing-stop / SL — preserve original trigger
+            close_reason = reject_reason.replace("FORCED_BY_", "FORCED_") + "_CONFIRMED"
+        else:
+            close_reason = "MODEL_SELL_CONFIRMED"
 
         ok_close = close_open_trade(
             exit_bid=price,
-            exit_signal_id=manual_sell_id,
-            reason="MANUAL_SELL_CONFIRMED",
+            exit_signal_id=s["id"],
+            reason=close_reason,
         )
-
         if not ok_close:
             return "❌ Failed to close active trade. State was NOT changed."
 
-        # update_state(STATE_EMPTY) # DB legacy fallback
+        # ── mark signal (ถ้าไม่ใช่ manual ที่ CONFIRMED ไปแล้ว) ───────────
+        if not is_manual:
+            ok_mark = mark_signal_execution(s["id"], "CONFIRMED", price)
+            if not ok_mark:
+                logger.warning(
+                    f"[UI] mark_signal_execution failed but trade is CLOSED — "
+                    f"forcing state to EMPTY | signal_id={s['id']}"
+                )
+
         set_state(STATE_EMPTY)
-        #send_trade_log("SELL", price, "MANUAL_SELL_CONFIRMED")
-        notify_sell_confirmed(price, "MANUAL_SELL_CONFIRMED")
+        send_trade_log("SELL", price, close_reason)
+        notify_sell_confirmed(price, close_reason, signal_id=s["id"])
 
         now_str = datetime.now(TZ_BKK).strftime("%Y-%m-%d %H:%M:%S")
-        return f"✅ SELL Confirmed! | ราคา {price:,.2f} THB | State → EMPTY | {now_str}"
+        mode_label = "Manual (no signal)" if is_manual else "Signal Confirmed"
+        return f"✅ SELL Confirmed! [{mode_label}] | ราคา {price:,.2f} THB | State → EMPTY | {now_str}"
 
     except ValueError:
         return "❌ ราคาไม่ถูกต้อง — กรอกตัวเลขเท่านั้น"
@@ -342,16 +409,28 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
             btn_refresh  = gr.Button("🔄 Refresh", variant="secondary")
             status_disp  = gr.Textbox(label="Last Refresh", interactive=False)
 
-        with gr.Column(scale=2):
+    with gr.Row():
+        with gr.Column():
             gr.Markdown("### 📡 Pending BUY ล่าสุด")
-            signal_id_disp  = gr.Textbox(label="Signal ID", interactive=False)
-            sig_label_disp  = gr.Textbox(label="Signal", interactive=False)
-            bar_time_disp   = gr.Textbox(label="Bar Time", interactive=False)
+            buy_signal_id_disp  = gr.Textbox(label="Signal ID", interactive=False)
+            buy_sig_label_disp  = gr.Textbox(label="Signal", interactive=False)
+            buy_bar_time_disp   = gr.Textbox(label="Bar Time", interactive=False)
             with gr.Row():
-                ask_disp = gr.Textbox(label="Ask Price", interactive=False)
-                bid_disp = gr.Textbox(label="Bid Price", interactive=False)
-            reason_disp     = gr.Textbox(label="Reject Reason / Status", interactive=False)
-            rationale_disp  = gr.Textbox(label="Rationale", interactive=False, lines=3)
+                buy_ask_disp = gr.Textbox(label="Ask Price", interactive=False)
+                buy_bid_disp = gr.Textbox(label="Bid Price", interactive=False)
+            buy_reason_disp     = gr.Textbox(label="Status", interactive=False)
+            buy_rationale_disp  = gr.Textbox(label="Rationale", interactive=False, lines=3)
+
+        with gr.Column():
+            gr.Markdown("### 📡 Pending SELL ล่าสุด")
+            sell_signal_id_disp  = gr.Textbox(label="Signal ID", interactive=False)
+            sell_sig_label_disp  = gr.Textbox(label="Signal", interactive=False)
+            sell_bar_time_disp   = gr.Textbox(label="Bar Time", interactive=False)
+            with gr.Row():
+                sell_ask_disp = gr.Textbox(label="Ask Price", interactive=False)
+                sell_bid_disp = gr.Textbox(label="Bid Price", interactive=False)
+            sell_reason_disp     = gr.Textbox(label="Status", interactive=False)
+            sell_rationale_disp  = gr.Textbox(label="Rationale", interactive=False, lines=3)
 
     gr.Markdown("---")
 
@@ -379,6 +458,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
                 label="ราคา Bid ที่ Execute (THB)",
                 placeholder="เช่น 71840"
             )
+            sell_signal_id_input = gr.Textbox(
+                label="Signal ID (เว้นว่างเพื่อใช้ PENDING ล่าสุด)",
+                placeholder="sig_... หรือ tp_..."
+            )
             btn_sell    = gr.Button("✅ Confirm SELL → State: EMPTY", variant="stop")
             sell_status = gr.Textbox(label="Status", interactive=False)
 
@@ -399,10 +482,16 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
     # ── All Outputs List ──────────────────────────────────────────────────────
     _dashboard_outputs = [
         state_disp, state_raw,
-        signal_id_disp,
-        sig_label_disp, bar_time_disp,
-        ask_disp, bid_disp,
-        reason_disp, rationale_disp,
+        # Pending BUY (7 fields)
+        buy_signal_id_disp,
+        buy_sig_label_disp, buy_bar_time_disp,
+        buy_ask_disp, buy_bid_disp,
+        buy_reason_disp, buy_rationale_disp,
+        # Pending SELL (7 fields)
+        sell_signal_id_disp,
+        sell_sig_label_disp, sell_bar_time_disp,
+        sell_ask_disp, sell_bid_disp,
+        sell_reason_disp, sell_rationale_disp,
         status_disp,
     ]
 
@@ -417,7 +506,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Aom NOW — Trade Confirm") as dem
 
     btn_sell.click(
         fn=confirm_sell,
-        inputs=[sell_price_input],
+        inputs=[sell_price_input, sell_signal_id_input],
         outputs=[sell_status],
     ).then(fn=fetch_dashboard, inputs=[], outputs=_dashboard_outputs)
 

@@ -56,6 +56,20 @@ GATE_SPREAD_NORM_MAX = 2.5   # คงเดิม
 GATE_REGIME_REQUIRED = 0     # ปิด — หรือใช้ LIVE_RELAXED
 BUY_GATE_MODE        = "LIVE_RELAXED"
 
+# ─── BUY Signal Config (per-session) ─────────────────────────────────────────
+# score_threshold : ranker_score ขั้นต่ำในแต่ละ session
+# bb_pos_max      : F_BB_Pos ต้องไม่เกิน (None = ปิด filter)
+# rsi6_max        : F_RSI_6 ต้องไม่เกิน (ป้องกันซื้อตอน overbought)
+SIGNAL_CONFIG: dict = {
+    "score_threshold_morning"   : 0.25,
+    "score_threshold_afternoon" : 0.50,
+    "score_threshold_night"     : 0.40,
+    "bb_pos_max_morning"        : None,   # ปิด filter — ช่วงเช้าไม่ restrict BB
+    "bb_pos_max_afternoon"      : 0.5,
+    "bb_pos_max_night"          : 0.5,
+    "rsi6_max"                  : 50,     # ใช้กับทุก session (RSI6 ≤ 50 = ยังไม่ overbought)
+}
+
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -83,4 +97,14 @@ SIGNALS_TABLE       = os.getenv("SIGNALS_TABLE", "v3_signals")
 BAR_LOGS_TABLE      = os.getenv("BAR_LOGS_TABLE", "v3_bar_logs")
 SYSTEM_STATE_TABLE  = os.getenv("SYSTEM_STATE_TABLE", "v3_system_state")
 ACTIVE_TRADES_TABLE = os.getenv("ACTIVE_TRADES_TABLE", "v3_active_trades")
-TP_SL_ATR_MULT          = 1.0   # Stop loss multiplier
+
+# ─── Session-End Force SELL ──────────────────────────────────────────────────
+# Bar times (BKK, "HH:MM") that force-emit a PENDING SELL when state=HOLDING,
+# regardless of TP/SL/gate decisions. Used to flatten position before session
+# transitions (e.g. 11:50 = right before noon break). Each entry must match
+# the bar grid (every :00,:10,:20,:30,:40,:50).
+FORCE_SELL_BAR_TIMES_BKK = [
+    "11:50",  # ก่อนหมด Morning session (12:00)
+    "17:50",  # ก่อนหมด Noon/Afternoon session (18:00)
+    "01:50",  # ก่อนหมด Late-night session (02:00 dead-zone)
+]
