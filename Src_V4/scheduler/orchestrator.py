@@ -15,6 +15,8 @@ from config.settings import (
     TP_SCORE_DROP_THRESH,
     TP_SL_ATR_MULT,
     TP_BE_FLOOR_OFFSET,
+    SIGNAL_THRESHOLD,
+    GATE_SPREAD_NORM_MAX,
 )
 from core.candle_builder import build_candles
 from core.feature_engine import compute_features
@@ -239,12 +241,55 @@ def run_signal_pipeline() -> None:
             )
             _save_tp_state_if_supported()
 
+            # ── HOLDING CHECK: full gate + TP diagnostic panel ───────────────
+            entry_ask    = float(tp_manager.entry_ask or 0.0)
+            current_bid  = float(features_row["hsh_close_bid"])
+            current_ask  = float(features_row["hsh_close_ask"])
+            current_score = float(inference_result["ranker_score"])
+            sl_price     = float(tp_manager.sl_price or 0.0)
+            pnl_thb      = (current_bid - entry_ask) if entry_ask else 0.0
+            pnl_pct      = (pnl_thb / entry_ask * 100.0) if entry_ask else 0.0
+            pnl_icon     = "🟢" if pnl_thb >= 0 else "🔴"
+            sl_buffer    = current_bid - sl_price if sl_price else 0.0
+
+            noise        = float(features_row.get("F_XAU_Spread_Norm", 0.0))
+            session_lbl  = features_row.get("session", "?")
+            g_market     = session_lbl != "Closed"
+            g_noise      = noise < GATE_SPREAD_NORM_MAX
+            g_score      = current_score < SIGNAL_THRESHOLD
+            g_profit     = current_bid > entry_ask if entry_ask else False
+
+            def _m(ok: bool) -> str:
+                return "✅" if ok else "❌"
+
+            pending_label = (
+                f"YES (id={existing_pending_sell.get('id')}, "
+                f"reason={existing_pending_sell.get('reject_reason')})"
+                if existing_pending_sell else "no"
+            )
+
             trading_log.info(
-                f"[POSITION] 🟢 ACTIVE "
-                f"| Bid: {features_row['hsh_close_bid']:,.2f} "
-                f"| Trail: {trail_level:,.2f} "
-                f"| SL: {(tp_manager.sl_price or 0):,.2f} "
-                f"| Score: {inference_result['ranker_score']:.4f}"
+                "\n" + "━" * 70 + "\n"
+                f"  📊 [HOLDING CHECK] bar={features_row['bar_time']} | session={session_lbl}\n"
+                + "━" * 70 + "\n"
+                f"  💰 Entry Ask  : {entry_ask:,.2f} THB\n"
+                f"  💵 Now Bid    : {current_bid:,.2f} THB   (Ask {current_ask:,.2f})\n"
+                f"  {pnl_icon} P&L       : {pnl_thb:+,.2f} THB  ({pnl_pct:+.2f}%)\n"
+                "  ─\n"
+                f"  🎯 SL price   : {sl_price:,.2f}    (buffer {sl_buffer:+,.2f})\n"
+                f"  📉 Trail      : {trail_level:,.2f}\n"
+                f"  🏔️  High Bid   : {tp_manager.highest_bid:,.2f}\n"
+                f"  🔒 BE Locked  : {tp_manager._breakeven_locked}\n"
+                f"  ⚙️  TP Trigger : {tp_trigger}\n"
+                "  ─\n"
+                "  🚪 SELL Gate Checklist (ทั้ง 4 ต้องผ่านถึงจะ pending SELL):\n"
+                f"     {_m(g_market)} market_open       session = {session_lbl}\n"
+                f"     {_m(g_noise)}  noise_gate        spread  = {noise:.3f}  < {GATE_SPREAD_NORM_MAX}\n"
+                f"     {_m(g_score)}  score_below_thr   score   = {current_score:.4f}  < {SIGNAL_THRESHOLD}\n"
+                f"     {_m(g_profit)} profit_ok         bid {current_bid:,.2f} > entry {entry_ask:,.2f}\n"
+                "  ─\n"
+                f"  📬 Pending SELL: {pending_label}\n"
+                + "━" * 70
             )
 
             if tp_trigger == "BREAKEVEN_LOCK":
