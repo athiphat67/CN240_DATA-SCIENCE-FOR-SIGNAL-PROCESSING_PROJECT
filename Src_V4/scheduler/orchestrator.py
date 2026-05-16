@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 from datetime import datetime
 
@@ -46,8 +47,13 @@ from notifier.discord_notifier import (
 )
 from notifier.trade_log_api import send_trade_log
 from rationale.generator import build_trade_payload
+import monitoring.pipeline_monitor as pm
 
 TZ = pytz.timezone(TIMEZONE)
+
+
+def _ms(t0: float) -> int:
+    return int((time.monotonic() - t0) * 1000)
 system_log = logging.getLogger("system")
 trading_log = logging.getLogger("trading")
 
@@ -181,19 +187,58 @@ def run_signal_pipeline() -> None:
     except Exception as _e:
         system_log.warning(f"[Job A] expire_stale_pending_signals skipped: {_e}")
 
+    _mon = pm.new_run()
+
     try:
-        candles_df = build_candles()
-        features_row = compute_features(candles_df)
+        # ── L1: Candle Builder ────────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            candles_df = build_candles()
+            pm.record_l1(_mon, candles_df, _ms(_t))
+        except Exception as _e1:
+            pm.record_l1_error(_mon, _ms(_t), str(_e1))
+            raise
+
+        # ── L2: Feature Engine ────────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            features_row = compute_features(candles_df)
+            pm.record_l2(_mon, features_row, _ms(_t))
+        except Exception as _e2:
+            pm.record_l2_error(_mon, _ms(_t), str(_e2))
+            raise
 
         if features_row["session"] == "Closed":
             system_log.info("[Job A] Market closed — skipping")
+            pm.finalize(_mon)
+            pm.print_terminal(_mon)
+            try:
+                pm.save_to_db(_mon)
+            except Exception:
+                pass
             return
 
-        inference_result = run_inference(features_row)
+        # ── L3: Model Inference ───────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            inference_result = run_inference(features_row)
+            pm.record_l3(_mon, inference_result, _ms(_t))
+        except Exception as _e3:
+            pm.record_l3_error(_mon, _ms(_t), str(_e3))
+            raise
+
         _last_bar_time = features_row["bar_time"]
         _last_score = inference_result["ranker_score"]
 
-        gate_result = evaluate_signal_gate(inference_result, features_row)
+        # ── L4: Signal Gate ───────────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            gate_result = evaluate_signal_gate(inference_result, features_row)
+            pm.record_l4(_mon, gate_result, _ms(_t))
+        except Exception as _e4:
+            pm.record_l4_error(_mon, _ms(_t), str(_e4))
+            raise
+
         _last_state = gate_result["state_before"]
 
         # ─── TP Manager: sync manual-confirm DB state and evaluate only while HOLDING ───
@@ -666,6 +711,13 @@ def run_signal_pipeline() -> None:
     except Exception as e:
         system_log.error(f"[Job A] Pipeline error: {e}", exc_info=True)
         notify_error("Job A — signal_pipeline", str(e))
+    finally:
+        pm.finalize(_mon)
+        pm.print_terminal(_mon)
+        try:
+            pm.save_to_db(_mon)
+        except Exception as _db_err:
+            system_log.warning(f"[Monitor] DB save skipped: {_db_err}")
 
 
 def run_heartbeat() -> None:
