@@ -336,7 +336,7 @@ class WatcherEngine:
         )
 
         strong_overbought = (
-            rsi > 70
+            rsi > 60
             and mom.get("roc", 0) < mom.get("roc_prev", 0)
             and macd.get("histogram", 0) < macd.get("prev_histogram", 0)
             and bb.get("signal") == "above_upper"

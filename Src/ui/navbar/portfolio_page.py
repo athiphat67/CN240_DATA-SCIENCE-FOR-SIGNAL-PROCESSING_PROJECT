@@ -29,7 +29,7 @@ class PortfolioPage(PageBase):
         with gr.Row():
             pc.register("cash",   gr.Number(label="💵 Cash Balance (฿)", value=1500.0, precision=2))
             pc.register("gold",   gr.Number(label="🥇 Gold (grams)",      value=0.0,    precision=4))
-            pc.register("trades", gr.Number(label="🔄 Trades Today",      value=0,      precision=0))
+            pc.register("trades", gr.Number(label="🔄 BUY Entries Today", value=0,      precision=0))
 
         with gr.Row():
             pc.register("cost",    gr.Number(label="📥 Cost Basis (฿)",   value=0.0, precision=2))

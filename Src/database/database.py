@@ -763,27 +763,53 @@ class RunDatabase:
         )
         return new_id
 
-    def get_trades_count_since(self, since_iso: str) -> int:
-        """นับจำนวนไม้ (BUY/SELL) ที่เกิดขึ้นตั้งแต่เวลา since_iso เป็นต้นมา"""
+    def get_trades_count_since(self, since_iso: str, action: Optional[str] = None) -> int:
+        """Count trade_log rows since ``since_iso``; optionally filter BUY/SELL case-insensitively."""
         if not since_iso:
             return 0
         query = """
             SELECT COUNT(*) as count
             FROM trade_log
             WHERE executed_at::timestamptz >= %s::timestamptz
+              AND (%s IS NULL OR UPPER(action) = UPPER(%s))
         """
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, (since_iso,))
+                    cursor.execute(query, (since_iso, action, action))
                     row = cursor.fetchone()
                     return int(row["count"] or 0)
         except Exception as e:
             sys_logger.error(f"get_trades_count_since FAILED: {e}")
             return 0
 
+    def count_trades_today_thai(self, action: Optional[str] = None) -> int:
+        """
+        Count rows in trade_log whose executed_at falls on today's Asia/Bangkok date.
+
+        Self-healing replacement for the persisted portfolio.trades_today counter:
+        accurate after restarts, immune to missed midnight resets, and tz-correct
+        regardless of the host's local timezone.
+        """
+        query = """
+            SELECT COUNT(*) AS cnt
+            FROM trade_log
+            WHERE (executed_at::timestamptz AT TIME ZONE 'Asia/Bangkok')::date
+                = (now() AT TIME ZONE 'Asia/Bangkok')::date
+              AND (%(action)s IS NULL OR UPPER(action) = UPPER(%(action)s))
+        """
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, {"action": action})
+                    row = cursor.fetchone()
+                    return int((row or {}).get("cnt") or 0)
+        except Exception as e:
+            sys_logger.error(f"count_trades_today_thai FAILED: {e}")
+            return 0
+
     def update_trades_this_session(self, count: int) -> None:
-        """Persist the current session trade count on the portfolio singleton."""
+        """Persist the current session BUY-entry count on the portfolio singleton."""
         safe_count = max(0, int(count or 0))
         now_str = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         query = """

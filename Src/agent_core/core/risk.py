@@ -1,4 +1,4 @@
-"""
+﻿"""
 agent_core/core/risk.py  — Scalping Edition (V5 WinRate Focus)
 Changes from V4:
   - atr_multiplier:      1.5  → 2.5   (ให้ trade หายใจได้มากขึ้น ลด SL โดนก่อน TP)
@@ -90,6 +90,22 @@ class RiskManager:
         gold_grams     = float(portfolio.get("gold_grams", 0.0))
         unrealized_pnl = float(portfolio.get("unrealized_pnl", 0.0))
         trades_today   = int(portfolio.get("trades_today", 0) or 0)
+        quota = market_state.get("execution_quota", {}) or {}
+        if quota:
+            entries_done = int(quota.get("entries_done", trades_today) or 0)
+            daily_target_entries = int(quota.get("daily_target_entries", 8) or 8)
+            quota_source = (
+                quota.get("source")
+                or quota.get("entries_done_source")
+                or "execution_quota"
+            )
+        else:
+            entries_done = trades_today
+            daily_target_entries = 8
+            quota_source = "portfolio_fallback"
+        effective_quota_met = bool(quota.get("quota_met")) or (
+            entries_done >= daily_target_entries
+        )
 
         summary = market_state.get("portfolio_summary", {})
 
@@ -131,20 +147,39 @@ class RiskManager:
             "rationale": market_context,
             "rejection_reason": None,
         }
+        final_decision["quota_source"] = quota_source
 
         # ================================================================
         # Gate 0c — Session End Force Sell [FIX Bug 2]
         # ================================================================
         session_gate = market_state.get("session_gate", {})
         mins_left = session_gate.get("minutes_to_session_end")
-        trades_this_session = int(session_gate.get("trades_this_session", 0) or 0)
+        trades_this_session = int(
+            session_gate.get(
+                "entries_this_session",
+                session_gate.get("trades_this_session", 0),
+            )
+            or 0
+        )
         _force_sell_active = bool(session_gate.get("is_emergency_sell"))
+
+        logger.info(
+            "[RiskManager] Quota state portfolio.trades_today=%s "
+            "entries_done=%s daily_target_entries=%s quota_met=%s "
+            "emergency_mode=%s source=%s",
+            trades_today,
+            entries_done,
+            daily_target_entries,
+            effective_quota_met,
+            session_gate.get("emergency_mode"),
+            quota_source,
+        )
 
         logger.debug(
             "[SessionGate keys] %s", list(session_gate.keys())
         )
         logger.debug(
-            "[SessionGate] near_session_end=%s quota_urgent=%s trades_this_session=%s mins_left=%s",
+            "[SessionGate] near_session_end=%s quota_urgent=%s entries_this_session=%s mins_left=%s",
             session_gate.get("near_session_end"),
             session_gate.get("quota_urgent"),
             trades_this_session,
@@ -199,17 +234,17 @@ class RiskManager:
                 final_decision["confidence"] = 1.0
             final_decision["rationale"] = (
                 f"[SESSION FORCE BUY] Emergency buy override with {mins_left} min left "
-                f"and {trades_this_session} trades completed. "
+                f"and {trades_this_session} BUY entries completed. "
                 f"LLM signal '{original_signal}' was {override_action}. "
                 f"Original rationale: {market_context}"
             )
             logger.warning(
-                "[RiskManager] Gate 0d EMERGENCY FORCED BUY (Stage 2) — %s min left, trades=%d",
+                "[RiskManager] Gate 0d EMERGENCY FORCED BUY (Stage 2) — %s min left, entries=%d",
                 mins_left, trades_this_session,
             )
         elif _relaxed_buy_active:
             logger.warning(
-                "[RiskManager] Gate 0d EMERGENCY RELAXED BUY (Stage 1) — %s min left, trades=%d "
+                "[RiskManager] Gate 0d EMERGENCY RELAXED BUY (Stage 1) — %s min left, entries=%d "
                 "(min_conf=%.2f, min_edge=%.2f)",
                 mins_left, trades_this_session,
                 self.relaxed_min_conf, self.relaxed_min_edge,
@@ -329,10 +364,23 @@ class RiskManager:
                         final_decision,
                         f"BUY conf ({final_decision['confidence']:.2f}) < {conf_threshold:.2f} (effective threshold)"
                     )
-            if trades_today >= 3:
-                return self._reject_signal(final_decision, f"ครบโควต้าซื้อรายวันแล้ว ({trades_today}/6)")
+            if effective_quota_met:
+                if _force_buy_active:
+                    final_decision["quota_bypassed_by"] = "forced_buy"
+                    final_decision["entries_done"] = entries_done
+                    final_decision["daily_target_entries"] = daily_target_entries
+                    logger.warning(
+                        "[RiskManager] Daily quota bypassed by forced_buy "
+                        "entries_done=%s/%s",
+                        entries_done,
+                        daily_target_entries,
+                    )
+                else:
+                    return self._reject_signal(
+                        final_decision,
+                        f"ครบโควต้าซื้อรายวันแล้ว ({entries_done}/{daily_target_entries})",
+                    )
 
-            quota = market_state.get("execution_quota", {}) or {}
             min_entries_by_now = int(quota.get("min_entries_by_now", 0) or 0)
             required_conf_next = float(quota.get("required_confidence_for_next_buy", self.min_confidence) or self.min_confidence)
 
@@ -340,7 +388,7 @@ class RiskManager:
             if (
                 not _force_buy_active
                 and not _relaxed_buy_active
-                and trades_today < min_entries_by_now
+                and entries_done < min_entries_by_now
                 and confidence < required_conf_next
             ):
                 return self._reject_signal(final_decision, f"ตาม scheduler ยังไม่ทัน และ conf ({confidence:.2f}) < {required_conf_next:.2f}")
@@ -454,7 +502,10 @@ class RiskManager:
                 return self._reject_signal(final_decision, "Low Cash")
 
             near_end    = session_gate.get("near_session_end", False)
-            trades_done = session_gate.get("trades_this_session", 0)
+            trades_done = session_gate.get(
+                "entries_this_session",
+                session_gate.get("trades_this_session", 0),
+            )
             # Both Stage 1 (relaxed) and Stage 2 (forced) emergency BUYs use the
             # safe minimum position size to cap exposure when quality is uncertain.
             is_forced   = (
@@ -535,7 +586,7 @@ class RiskManager:
             if gold_grams <= 1e-4:
                 return self._reject_signal(final_decision, "ไม่มีทองเพียงพอสำหรับการขาย")
             
-            MIN_PROFIT_FILTER = 2.0  # [FIX v6] ลดจาก 10→2 THB — 10 THB สูงเกินไปสำหรับ position 1000 THB, ทำให้ไม่มีทางขายอัตโนมัติได้
+            MIN_PROFIT_FILTER = 0.1  # [FIX v6] ลดจาก 10→2 THB — 10 THB สูงเกินไปสำหรับ position 1000 THB, ทำให้ไม่มีทางขายอัตโนมัติได้
             
             # ✅ [FIX] ดึงค่า final_decision["rationale"] มาเช็คเพื่อเลี่ยง NameError 
             current_rationale = final_decision.get("rationale", "")

@@ -40,6 +40,7 @@ Builds PromptPackage objects for the ReAct loop.
 """
 
 import json
+import logging
 from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
@@ -47,6 +48,8 @@ import textwrap
 from datetime import datetime, timezone, timedelta
 
 from data_engine.tools.tool_registry import list_tools
+
+logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # Core data transfer object
 # ─────────────────────────────────────────────
@@ -435,14 +438,14 @@ class PromptBuilder:
         if stage == "forced":
             return (
                 f"URGENT (FORCED): Session ends in {mins_left} mins. "
-                "Zero trades completed. EXECUTE BUY IMMEDIATELY — "
+                "Zero BUY entries completed. EXECUTE BUY IMMEDIATELY — "
                 "ignore edge score, spread coverage, and HTF trend gates. "
                 "Do not wait for further confirmation."
             )
         if stage == "relaxed" or session_gate.get("is_emergency_buy"):
             return (
                 f"URGENT: Session ends in {mins_left} mins. "
-                "Zero trades completed. RELAX all technical gates. "
+                "Zero BUY entries completed. RELAX all technical gates. "
                 "Find any reasonable support or momentum to ENTER now."
             )
         return ""
@@ -480,6 +483,56 @@ class PromptBuilder:
             return f"${float(value):,.2f}"
         except (TypeError, ValueError):
             return f"${value}"
+
+    def _resolve_buy_entries_today(self, quota: dict, portfolio: dict) -> tuple[int, str]:
+        quota = quota if isinstance(quota, dict) else {}
+        portfolio = portfolio if isinstance(portfolio, dict) else {}
+        candidates = (
+            ("execution_quota.entries_done", quota.get("entries_done")),
+            ("execution_quota.entries_done_today", quota.get("entries_done_today")),
+            ("execution_quota.trades_today", quota.get("trades_today")),
+            ("portfolio.entries_done", portfolio.get("entries_done")),
+            ("portfolio.entries_done_today", portfolio.get("entries_done_today")),
+            ("Legacy portfolio.trades_today", portfolio.get("trades_today")),
+        )
+        for source, value in candidates:
+            if value is None:
+                continue
+            try:
+                entries_done = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+            if source == "Legacy portfolio.trades_today":
+                logger.debug(
+                    "[PromptBuilder] BUY entries today fallback: "
+                    "Legacy portfolio.trades_today=%s",
+                    entries_done,
+                )
+            return entries_done, source
+        return 0, "default_zero"
+
+    def _resolve_entries_remaining(
+        self,
+        quota: dict,
+        entries_done: int,
+        target: int,
+        entries_done_source: str,
+    ):
+        quota = quota if isinstance(quota, dict) else {}
+        remaining = quota.get("entries_remaining")
+        if remaining is not None:
+            try:
+                return max(0, int(remaining))
+            except (TypeError, ValueError):
+                pass
+        if entries_done_source == "Legacy portfolio.trades_today":
+            logger.debug(
+                "[PromptBuilder] Entries remaining unavailable because only "
+                "Legacy portfolio.trades_today was available; not deriving "
+                "remaining quota from legacy portfolio count."
+            )
+            return "N/A"
+        return max(0, int(target) - int(entries_done))
 
     def _format_market_state(self, state: dict, iteration: int = 1) -> str:
         """Format market state for LLM — dynamically slims down in later iterations"""
@@ -625,17 +678,17 @@ class PromptBuilder:
             "────────────────────────────────────────",
         ]
 
-        # # ── [NEW] Dynamic Session Weights ──
-        # dyn_weights = state.get("dynamic_weights")
-        # if dyn_weights:
-        #     lines +=[
-        #         "",
-        #         "── Dynamic Session Weights ──",
-        #         f"Session: {dyn_weights.get('session')} (XGB: {dyn_weights.get('xgb_w')}, News: {dyn_weights.get('news_w')}, Tech: {dyn_weights.get('tech_w')})",
-        #         f"Weighted Direction: {dyn_weights.get('direction')}",
-        #         f"Base Confidence: {dyn_weights.get('base_confidence')}",
-        #         "─────────────────────────────",
-        #     ]
+        # ── [NEW] Dynamic Session Weights ──
+        #dyn_weights = state.get("dynamic_weights")
+        #if dyn_weights:
+        #    lines +=[
+        #        "",
+        #        "── Dynamic Session Weights ──",
+        #        f"Session: {dyn_weights.get('session')} (XGB: {dyn_weights.get('xgb_w')}, News: {dyn_weights.get('news_w')}, Tech: {dyn_weights.get('tech_w')})",
+        #        f"Weighted Direction: {dyn_weights.get('direction')}",
+        #        f"Base Confidence: {dyn_weights.get('base_confidence')}",
+        #        "─────────────────────────────",
+        #    ]
 
 
         # ── [XGB] XGBoost Pre-Analysis ──────────────────────────────────────
@@ -654,15 +707,30 @@ class PromptBuilder:
 
         portfolio = state.get("portfolio", {})
         quota = state.get("execution_quota", {})
+        entries_done, entries_done_source = self._resolve_buy_entries_today(
+            quota,
+            portfolio,
+        )
         if quota:
+            target = quota.get("daily_target_entries", 8)
+            try:
+                target_int = int(target)
+            except (TypeError, ValueError):
+                target_int = 8
+            entries_remaining = self._resolve_entries_remaining(
+                quota,
+                entries_done,
+                target_int,
+                entries_done_source,
+            )
             lines += [
                 "",
                 "── Daily Entry Quota ──",
-                f"  Target entries/day: {quota.get('daily_target_entries', 3)}",
-                f"  Entries done:       {quota.get('entries_done', 0)}",
-                f"  Entries remaining:  {quota.get('entries_remaining', 0)}",
+                f"  Target entries/day: {target}",
+                f"  Entries done:       {entries_done}",
+                f"  Entries remaining:  {entries_remaining}",
                 f"  Quota met:          {quota.get('quota_met', False)}",
-                f"  Current slot:       {quota.get('current_slot', 'N/A')} / 3",
+                f"  Current slot:       {quota.get('current_slot', 'N/A')} / {target}",
                 f"  Min entries by now: {quota.get('min_entries_by_now', 'N/A')}",
                 f"  Next BUY min conf:  {quota.get('required_confidence_for_next_buy', 'N/A')}",
                 f"  Next BUY size:      {quota.get('recommended_next_position_thb', 'N/A')} THB",
@@ -674,7 +742,6 @@ class PromptBuilder:
             cash      = portfolio.get("cash_balance", 0.0)
             gold_g    = portfolio.get("gold_grams", 0.0)
             pnl       = portfolio.get("unrealized_pnl", 0.0)
-            trades_td = portfolio.get("trades_today", 0)
             cost      = portfolio.get("cost_basis_thb", 0.0)
             cur_val   = portfolio.get("current_value_thb", 0.0)
 
@@ -697,7 +764,7 @@ class PromptBuilder:
                 f"  Cost basis:     ฿{cost:,.2f}",
                 f"  Current value:  ฿{cur_val:,.2f}",
                 f"  Unrealized PnL: ฿{pnl:,.2f}{pnl_tag}",
-                f"  Trades today:   {trades_td}",
+                f"  BUY entries today: {entries_done}",
                 f"  can_buy:  {can_buy}",
                 f"  can_sell: {can_sell}",
                 "── End Portfolio ──",

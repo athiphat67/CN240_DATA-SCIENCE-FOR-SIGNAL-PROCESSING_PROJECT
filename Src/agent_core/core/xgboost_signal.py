@@ -83,8 +83,20 @@ class XGBoostPredictor:
             row = pd.DataFrame([{col: features.get(col, 0.0) for col in self.feature_columns}])
             
             # predict_proba ใช้ได้ทั้ง sklearn object และ xgboost booster
-            probs = self._model.predict_proba(row)[0]
-            prob_sell, prob_buy = float(probs[0]), float(probs[2])
+            probs = np.asarray(self._model.predict_proba(row)[0], dtype=float).ravel()
+            if probs.size >= 3:
+                prob_sell, prob_buy = float(probs[0]), float(probs[2])
+            elif probs.size == 2:
+                classes = list(getattr(self._model, "classes_", []))
+                if "BUY" in classes:
+                    prob_buy = float(probs[classes.index("BUY")])
+                elif 1 in classes:
+                    prob_buy = float(probs[classes.index(1)])
+                else:
+                    prob_buy = float(probs[-1])
+                prob_sell = 0.0
+            else:
+                raise ValueError(f"predict_proba returned {probs.size} probabilities")
         except Exception as e:
             logger.error(f"[XGB] Prediction failed: {e}")
             return XGBOutput(0.0, 0.0, "HOLD", 0.0, session, False)

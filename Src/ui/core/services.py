@@ -66,29 +66,29 @@ from agent_core.core.xgboost_signal import XGBoostPredictor, SignalAggregator
 
 _PROVIDER_ALIASES: dict[str, str] = {
     # Gemini 3.1 variants (new primary)
-    "gemini_3.1_flash_lite_preview":  "gemini",
-    "gemini-3.1-flash-lite-preview":  "gemini",
-    "gemini 3.1 flash lite preview":  "gemini",
-    "gemini_3.1_flash_lite":          "gemini",
+    "gemini_3.1_flash_lite_preview": "gemini",
+    "gemini-3.1-flash-lite-preview": "gemini",
+    "gemini 3.1 flash lite preview": "gemini",
+    "gemini_3.1_flash_lite": "gemini",
     # Gemini 2.5 variants
-    "gemini_2.5_flash":             "gemini",
-    "gemini_2.5_flash_lite":        "gemini",
-    "gemini-2.5-flash":             "gemini",
-    "gemini-2.5-flash-preview":     "gemini",
-    "gemini-2.5-flash-lite":        "gemini",
-    "gemini 2.5 flash":             "gemini",
-    "gemini 2.5 flash lite":        "gemini",
+    "gemini_2.5_flash": "gemini",
+    "gemini_2.5_flash_lite": "gemini",
+    "gemini-2.5-flash": "gemini",
+    "gemini-2.5-flash-preview": "gemini",
+    "gemini-2.5-flash-lite": "gemini",
+    "gemini 2.5 flash": "gemini",
+    "gemini 2.5 flash lite": "gemini",
     # Groq variants
-    "groq_llama":                   "groq",
-    "llama-3.3-70b-versatile":      "groq",
+    "groq_llama": "groq",
+    "llama-3.3-70b-versatile": "groq",
     "groq llama 3.3 70b versatile": "groq",
     # OpenRouter — old underscore names → new colon syntax
-    "openrouter_llama_70b":         "openrouter:llama-70b",
-    "openrouter_qwen_72b":          "openrouter:llama-70b",
-    "openrouter_mistral_7b":        "openrouter:mistral-small",
+    "openrouter_llama_70b": "openrouter:llama-70b",
+    "openrouter_qwen_72b": "openrouter:llama-70b",
+    "openrouter_mistral_7b": "openrouter:mistral-small",
     # Others
-    "mock-v1":                      "mock",
-    "mock_v1":                      "mock",
+    "mock-v1": "mock",
+    "mock_v1": "mock",
 }
 
 
@@ -121,8 +121,8 @@ def _normalize_provider(provider: str) -> str:
     return provider
 
 
-DAILY_TARGET_ENTRIES = 3
-QUOTA_CONFIDENCE_LADDER = (0.60, 0.63, 0.67)
+DAILY_TARGET_ENTRIES = 8
+QUOTA_CONFIDENCE_LADDER = (0.40, 0.40, 0.40)
 QUOTA_POSITION_LADDER_THB = (1000, 1000, 1000)
 
 
@@ -147,26 +147,69 @@ def build_execution_quota_from_portfolio(
     *,
     session_gate: Optional[Dict[str, Any]] = None,
     source: str = "database",
+    trades_today_override: Optional[int] = None,
+    entries_done_override: Optional[int] = None,
+    exits_done_override: Optional[int] = None,
+    total_trades_today_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Build execution quota only after runtime portfolio/session context is known.
 
     The data orchestrator must stay market-data only; quota depends on persisted
     portfolio counters and optional SessionGate context from the service layer.
+
+    ``entries_done`` is the canonical daily BUY-entry count. The legacy
+    ``trades_today`` key is retained as an alias for BUY entries, not BUY+SELL
+    totals. Use ``total_trades_today`` for the true BUY+SELL count.
+
+    ``trades_today_override`` is a compatibility alias for
+    ``entries_done_override``.
     """
     portfolio = portfolio if isinstance(portfolio, dict) else {}
     session_gate = session_gate if isinstance(session_gate, dict) else {}
 
-    trades_today = max(0, _safe_int(portfolio.get("trades_today", 0)))
-    trades_this_session = max(0, _safe_int(portfolio.get("trades_this_session", 0)))
-    entries_remaining = max(0, DAILY_TARGET_ENTRIES - trades_today)
-    quota_met = trades_today >= DAILY_TARGET_ENTRIES
+    if entries_done_override is None:
+        entries_done_override = trades_today_override
 
-    current_slot = _current_quota_slot()
-    min_entries_by_now = max(0, current_slot - 1)
-    next_slot_index = min(trades_today, DAILY_TARGET_ENTRIES - 1)
+    if entries_done_override is not None and entries_done_override >= 0:
+        entries_done = max(0, _safe_int(entries_done_override))
+        entries_done_source = "trade_log"
+    else:
+        entries_done = max(0, _safe_int(portfolio.get("trades_today", 0)))
+        entries_done_source = "portfolio_fallback"
+
+    exits_done = max(0, _safe_int(exits_done_override))
+    total_trades_today = (
+        max(0, _safe_int(total_trades_today_override))
+        if total_trades_today_override is not None
+        else entries_done + exits_done
+    )
+    entries_this_session = max(
+        0,
+        _safe_int(
+            portfolio.get(
+                "entries_this_session",
+                portfolio.get("trades_this_session", 0),
+            )
+        ),
+    )
+    entries_remaining = max(0, DAILY_TARGET_ENTRIES - entries_done)
+    quota_met = entries_done >= DAILY_TARGET_ENTRIES
+
+    # Time-of-day window (1=morning, 2=afternoon, 3=evening) — used for pacing.
+    time_window = _current_quota_slot()
+    # Scale the existing pacing rule (one ladder rung per time-window) to the
+    # new DAILY_TARGET_ENTRIES so "entries expected by now" stays meaningful.
+    min_entries_by_now = ((time_window - 1) * DAILY_TARGET_ENTRIES) // 3
+
+    # current_slot is now entry-progress (Nth entry of the day, 1..target).
+    current_slot = min(entries_done + 1, DAILY_TARGET_ENTRIES)
+
+    # Safe-clamp the ladder index so any future bump of DAILY_TARGET_ENTRIES
+    # past len(LADDER) cannot raise IndexError.
+    ladder_index = min(max(0, entries_done), len(QUOTA_CONFIDENCE_LADDER) - 1)
     recommended_position = (
-        0 if quota_met else QUOTA_POSITION_LADDER_THB[next_slot_index]
+        0 if quota_met else QUOTA_POSITION_LADDER_THB[ladder_index]
     )
 
     quota = {
@@ -174,32 +217,38 @@ def build_execution_quota_from_portfolio(
         "computed_at": get_thai_time().isoformat(),
         "portfolio_updated_at": portfolio.get("updated_at"),
         "daily_target_entries": DAILY_TARGET_ENTRIES,
-        "entries_done": trades_today,
-        "entries_done_today": trades_today,
+        "entries_done": entries_done,
+        "entries_done_today": entries_done,
+        "entries_done_source": entries_done_source,
         "entries_remaining": entries_remaining,
         "quota_met": quota_met,
-        "trades_today": trades_today,
-        "trades_this_session": trades_this_session,
+        # Legacy aliases: BUY-entry counts, not BUY+SELL totals.
+        "trades_today": entries_done,
+        "trades_this_session": entries_this_session,
+        "entries_this_session": entries_this_session,
+        "exits_done": exits_done,
+        "total_trades_today": total_trades_today,
         "trades_this_session_source": portfolio.get("trades_this_session_source"),
         "current_slot": current_slot,
+        "time_window": time_window,
         "min_entries_by_now": min_entries_by_now,
-        "required_confidence_for_next_buy": QUOTA_CONFIDENCE_LADDER[next_slot_index],
+        "required_confidence_for_next_buy": QUOTA_CONFIDENCE_LADDER[ladder_index],
         "recommended_next_position_thb": recommended_position,
     }
 
     if session_gate:
-        quota.update({
-            "session_id": session_gate.get("session_id"),
-            "quota_group_id": session_gate.get("quota_group_id"),
-            "session_start_iso": session_gate.get("session_start_iso"),
-            "minutes_to_session_end": session_gate.get("minutes_to_session_end"),
-            "session_quota_urgent": bool(session_gate.get("quota_urgent", False)),
-            "emergency_mode": session_gate.get("emergency_mode"),
-        })
+        quota.update(
+            {
+                "session_id": session_gate.get("session_id"),
+                "quota_group_id": session_gate.get("quota_group_id"),
+                "session_start_iso": session_gate.get("session_start_iso"),
+                "minutes_to_session_end": session_gate.get("minutes_to_session_end"),
+                "session_quota_urgent": bool(session_gate.get("quota_urgent", False)),
+                "emergency_mode": session_gate.get("emergency_mode"),
+            }
+        )
 
     return quota
-
-    
 
 
 # ─────────────────────────────────────────────
@@ -229,17 +278,16 @@ class AnalysisService:
         discord_notifier: DiscordNotifier = None,
         telegram_notifier: TelegramNotifier = None,
     ):
-        self.skill_registry    = skill_registry
-        self.role_registry     = role_registry
+        self.skill_registry = skill_registry
+        self.role_registry = role_registry
         self.data_orchestrator = data_orchestrator
-        self.persistence       = persistence
-        self.discord_notifier  = discord_notifier
+        self.persistence = persistence
+        self.discord_notifier = discord_notifier
         self.telegram_notifier = telegram_notifier
-        self.max_retries       = SERVICE_CONFIG["max_retries"]
+        self.max_retries = SERVICE_CONFIG["max_retries"]
         sys_logger.info(f"AnalysisService initialized (max_retries={self.max_retries})")
         self.risk_manager = RiskManager()
         sys_logger.info("RiskManager initialized as singleton")
-
 
     def run_analysis(
         self,
@@ -286,12 +334,12 @@ class AnalysisService:
         if validation_error:
             sys_logger.error(f"Validation failed: {validation_error}")
             return {
-                "status":     "error",
-                "error":      validation_error,
+                "status": "error",
+                "error": validation_error,
                 "error_type": "validation",
-                "attempt":    0,
+                "attempt": 0,
             }
-            
+
         # ═══════════════════════════════════════════
         # GATE-1 │ services.py → run_analysis() หลัง normalize provider
         # ═══════════════════════════════════════════
@@ -309,48 +357,55 @@ class AnalysisService:
             sys_logger.warning(
                 "Thailand gold market is closed (weekend/holiday) — running analysis anyway"
             )
-        
+
         # ── [NEW] 1. ดึงความทรงจำจากความเจ็บปวด (Reflective Memory) ──
         recent_trades = []
         # print(recent_trades)
         if self.persistence:
-                try:
-                    # ใช้ get_trade_history แทน get_recent_runs เพื่อดึง PnL จริง
-                    trade_history = self.persistence.get_trade_history(limit=5)
+            try:
+                # ใช้ get_trade_history แทน get_recent_runs เพื่อดึง PnL จริง
+                trade_history = self.persistence.get_trade_history(limit=5)
 
-                    # เอาแค่ 3 ไม้ล่าสุด
-                    for t in trade_history[:3]:
-                        dt_str = str(t.get("executed_at", ""))
-                        time_str = dt_str.split("T")[1][:5] if "T" in dt_str else dt_str[-8:-3]
-                        
-                        # เช็คสถานะ PnL (ถ้าเป็นไม้ BUY, PnL จะเป็น None ใน DB ของคุณ)
-                        pnl_val = t.get("pnl_thb")
-                        if pnl_val is not None:
-                            status_mark = "❌ LOSS" if pnl_val < 0 else "✅ WIN"
-                            pnl_str = f"{pnl_val:+.2f}"
-                        else:
-                            status_mark = "⏳ ENTRY"
-                            pnl_str = "0.00"
+                # เอาแค่ 3 ไม้ล่าสุด
+                for t in trade_history[:3]:
+                    dt_str = str(t.get("executed_at", ""))
+                    time_str = (
+                        dt_str.split("T")[1][:5] if "T" in dt_str else dt_str[-8:-3]
+                    )
 
-                        # พยายามดึง rationale ถ้าไม่มีให้ใช้ note
-                        reason_str = t.get("rationale") or t.get("note") or "N/A"
-                        # ตัดคำให้สั้นลงไม่เปลือง Token
-                        if len(reason_str) > 100: reason_str = reason_str[:100] + "..."
-                        
-                        recent_trades.append({
+                    # เช็คสถานะ PnL (ถ้าเป็นไม้ BUY, PnL จะเป็น None ใน DB ของคุณ)
+                    pnl_val = t.get("pnl_thb")
+                    if pnl_val is not None:
+                        status_mark = "❌ LOSS" if pnl_val < 0 else "✅ WIN"
+                        pnl_str = f"{pnl_val:+.2f}"
+                    else:
+                        status_mark = "⏳ ENTRY"
+                        pnl_str = "0.00"
+
+                    # พยายามดึง rationale ถ้าไม่มีให้ใช้ note
+                    reason_str = t.get("rationale") or t.get("note") or "N/A"
+                    # ตัดคำให้สั้นลงไม่เปลือง Token
+                    if len(reason_str) > 100:
+                        reason_str = reason_str[:100] + "..."
+
+                    recent_trades.append(
+                        {
                             "time": time_str or "Recent",
                             "action": t.get("action", "UNKNOWN"),
                             "status": status_mark,
                             "pnl_thb": pnl_str,
-                            "reason": reason_str
-                        })
-                            
-                    # กลับด้านเพื่อให้ไม้ล่าสุดอยู่ท้ายสุด
-                    recent_trades.reverse()
-                    sys_logger.info(f"Loaded {len(recent_trades)} executed trades for Reflective Memory.")
-                except Exception as e:
-                    sys_logger.warning(f"Failed to load recent trades memory: {e}")
-            # ─────────────────────────────────────────────────────────
+                            "reason": reason_str,
+                        }
+                    )
+
+                # กลับด้านเพื่อให้ไม้ล่าสุดอยู่ท้ายสุด
+                recent_trades.reverse()
+                sys_logger.info(
+                    f"Loaded {len(recent_trades)} executed trades for Reflective Memory."
+                )
+            except Exception as e:
+                sys_logger.warning(f"Failed to load recent trades memory: {e}")
+        # ─────────────────────────────────────────────────────────
 
         # ── Retry loop ─────────────────────────────────────────────────────
         last_error = None
@@ -363,14 +418,22 @@ class AnalysisService:
 
                 # Step 2a: Fetch market data
                 _PERIOD_TO_DAYS = {
-                    "1d": 1, "3d": 3, "5d": 5, "7d": 7, "14d": 14,
-                    "1mo": 30, "2mo": 60, "3mo": 90,
+                    "1d": 1,
+                    "3d": 3,
+                    "5d": 5,
+                    "7d": 7,
+                    "14d": 14,
+                    "1mo": 30,
+                    "2mo": 60,
+                    "3mo": 90,
                 }
-                interval = intervals[0]   # ← define ก่อน (Step 2b)
-                sys_logger.info(f"Fetching market data (period={period}, interval={interval})...")
+                interval = intervals[0]  # ← define ก่อน (Step 2b)
+                sys_logger.info(
+                    f"Fetching market data (period={period}, interval={interval})..."
+                )
                 market_state = self.data_orchestrator.run(
-                    history_days=_PERIOD_TO_DAYS.get(period, 90), 
-                    interval=interval, 
+                    history_days=_PERIOD_TO_DAYS.get(period, 90),
+                    interval=interval,
                     save_to_file=True,
                 )
 
@@ -378,12 +441,9 @@ class AnalysisService:
                     raise ValueError("Failed to fetch market data")
 
                 data_quality = market_state.get("data_quality", {}) or {}
-                if (
-                    data_quality.get("source") == "supabase_hsh_ig"
-                    and (
-                        data_quality.get("status") != "ok"
-                        or bool(data_quality.get("stale", False))
-                    )
+                if data_quality.get("source") == "supabase_hsh_ig" and (
+                    data_quality.get("status") != "ok"
+                    or bool(data_quality.get("stale", False))
                 ):
                     raise ValueError(
                         "Supabase HSH/IG market data not usable: "
@@ -394,21 +454,25 @@ class AnalysisService:
                     )
 
                 sys_logger.info("Market data fetched successfully")
-                
+
                 sys_logger.info("Starting Async Pre-fetch for Tools...")
                 # ถ้าไฟล์นี้รันอยู่ใน async function อยู่แล้ว ใช้ await ได้เลย
                 # แต่ถ้าไฟล์นี้เป็นฟังก์ชันธรรมดา (sync) ต้องใช้ asyncio.run() ครอบ
                 try:
-                    pre_fetched_data = asyncio.run(pre_fetch_market_data(session_context={})) 
-                    
-                    # ยัดข้อมูลที่ดึงมาล่วงหน้าลงใน state 
+                    pre_fetched_data = asyncio.run(
+                        pre_fetch_market_data(session_context={})
+                    )
+
+                    # ยัดข้อมูลที่ดึงมาล่วงหน้าลงใน state
                     # PromptBuilder จะเห็น key นี้แล้วสวิตช์เป็นโหมด Fast Track อัตโนมัติ
                     market_state["pre_fetched_tools"] = pre_fetched_data
-                    
+
                     sys_logger.info("Pre-fetch completed successfully")
                 except Exception as e:
-                    sys_logger.error(f"Pre-fetch failed, continuing with normal loop: {e}")
-                    # ถ้าพังก็ไม่เป็นไร เพราะถ้าไม่มี key "pre_fetched_tools" 
+                    sys_logger.error(
+                        f"Pre-fetch failed, continuing with normal loop: {e}"
+                    )
+                    # ถ้าพังก็ไม่เป็นไร เพราะถ้าไม่มี key "pre_fetched_tools"
                     # ReAct Loop จะทำงาน 3 Iterations ตามปกติ (Fallback ที่ปลอดภัย)
 
                 market_state["recent_trades"] = recent_trades
@@ -424,6 +488,7 @@ class AnalysisService:
 
                 if not portfolio:
                     from ui.core.config import DEFAULT_PORTFOLIO
+
                     portfolio = DEFAULT_PORTFOLIO.copy()
                 else:
                     portfolio = dict(portfolio)
@@ -435,16 +500,24 @@ class AnalysisService:
                     gold_grams = float(portfolio.get("gold_grams", 0.0))
                     if gold_grams > 0:
                         # ใช้ราคา "รับซื้อ (Buy Price)" เพราะเป็นราคาที่เราจะได้เงินจริงถ้าขายตอนนี้
-                        thai_gold = market_state.get("market_data", {}).get("thai_gold_thb", {})
-                        current_buy_price_baht = float(thai_gold.get("buy_price_thb", 0))
-                        
+                        thai_gold = market_state.get("market_data", {}).get(
+                            "thai_gold_thb", {}
+                        )
+                        current_buy_price_baht = float(
+                            thai_gold.get("buy_price_thb", 0)
+                        )
+
                         if current_buy_price_baht > 0:
                             price_per_gram = current_buy_price_baht / 15.244
-                            cost_basis_per_gram = float(portfolio.get("cost_basis_thb", 0))
-                            
+                            cost_basis_per_gram = float(
+                                portfolio.get("cost_basis_thb", 0)
+                            )
+
                             new_current_value = gold_grams * price_per_gram
-                            new_pnl = new_current_value - (gold_grams * cost_basis_per_gram)
-                            
+                            new_pnl = new_current_value - (
+                                gold_grams * cost_basis_per_gram
+                            )
+
                             # Update the portfolio dict that goes into market_state
                             portfolio["current_value_thb"] = round(new_current_value, 2)
                             portfolio["unrealized_pnl"] = round(new_pnl, 2)
@@ -486,12 +559,41 @@ class AnalysisService:
                     "cash": round(cash, 2),
                     "can_trade": can_trade,
                     "mode": mode,
-                    "bias": bias
+                    "bias": bias,
                 }
+
+                entries_done_live: Optional[int] = None
+                exits_done_live: Optional[int] = None
+                total_trades_today_live: Optional[int] = None
+                if self.persistence and hasattr(
+                    self.persistence, "count_trades_today_thai"
+                ):
+                    try:
+                        entries_done_live = int(
+                            self.persistence.count_trades_today_thai(action="BUY") or 0
+                        )
+                        exits_done_live = int(
+                            self.persistence.count_trades_today_thai(action="SELL") or 0
+                        )
+                        total_trades_today_live = int(
+                            self.persistence.count_trades_today_thai() or 0
+                        )
+                    except Exception as _quota_err:
+                        sys_logger.warning(
+                            "count_trades_today_thai failed, falling back to "
+                            "portfolio.trades_today: %s",
+                            _quota_err,
+                        )
+                        entries_done_live = None
+                        exits_done_live = None
+                        total_trades_today_live = None
 
                 market_state["execution_quota"] = build_execution_quota_from_portfolio(
                     portfolio,
                     source=portfolio_source,
+                    entries_done_override=entries_done_live,
+                    exits_done_override=exits_done_live,
+                    total_trades_today_override=total_trades_today_live,
                 )
 
                 sys_logger.info(
@@ -505,10 +607,16 @@ class AnalysisService:
                 # 🎯 [MTF Phase 2] Classify Market Regime from trend_analysis
                 try:
                     trend_analysis = market_state.get("trend_analysis", {})
-                    market_state["market_regime"] = self._detect_market_regime(trend_analysis)
-                    sys_logger.info(f"[MTF] Market Regime detected: {market_state['market_regime']}")
+                    market_state["market_regime"] = self._detect_market_regime(
+                        trend_analysis
+                    )
+                    sys_logger.info(
+                        f"[MTF] Market Regime detected: {market_state['market_regime']}"
+                    )
                 except Exception as _regime_err:
-                    sys_logger.warning(f"[MTF] Market regime detection failed: {_regime_err}")
+                    sys_logger.warning(
+                        f"[MTF] Market regime detection failed: {_regime_err}"
+                    )
                     market_state["market_regime"] = "UNKNOWN"
 
                 # 🎯 สกัด DataFrame ออกจาก state เพื่อไม่ให้ระบบ Database พังตอนเซฟ
@@ -519,27 +627,33 @@ class AnalysisService:
                     provider=provider,
                     market_state=market_state,
                     interval=interval,
-                    ohlcv_df=ohlcv_df, # 🎯 ส่งต่อไปให้ Agent
+                    ohlcv_df=ohlcv_df,  # 🎯 ส่งต่อไปให้ Agent
                     bypass_session_gate=bypass_session_gate,
                 )
                 interval_results = {interval: interval_result}
 
                 # Extract llm log
-                llm_logs_pending: List[dict] = [_extract_llm_log(interval_result, interval)]
+                llm_logs_pending: List[dict] = [
+                    _extract_llm_log(interval_result, interval)
+                ]
 
                 sys_logger.info("Interval analysis complete")
 
                 # Step 2d: Build voting_result passthrough (no multi-vote)
                 voting_result = {
-                    "final_signal":        interval_result.get("signal", "HOLD"),
+                    "final_signal": interval_result.get("signal", "HOLD"),
                     "weighted_confidence": interval_result.get("confidence", 0.0),
-                    "voting_breakdown":    {},
-                    "interval_details":    [{
-                        "interval":   interval,
-                        "signal":     interval_result.get("signal", "HOLD"),
-                        "confidence": round(interval_result.get("confidence", 0.0), 3),
-                        "weight":     1.0,
-                    }],
+                    "voting_breakdown": {},
+                    "interval_details": [
+                        {
+                            "interval": interval,
+                            "signal": interval_result.get("signal", "HOLD"),
+                            "confidence": round(
+                                interval_result.get("confidence", 0.0), 3
+                            ),
+                            "weight": 1.0,
+                        }
+                    ],
                     "rationale": interval_result.get("rationale", ""),  # ← เพิ่มบรรทัดนี้
                 }
 
@@ -550,15 +664,16 @@ class AnalysisService:
                 )
 
                 # Step 2e: Provider label (แสดง fallback ถ้ามี)
-                best_iv = interval   # single interval — ไม่ต้อง max()
+                best_iv = interval  # single interval — ไม่ต้อง max()
                 actual_provider = interval_result.get("provider_used", provider)
-                provider_label  = (
-                    f"{provider}→{actual_provider}" if actual_provider != provider
+                provider_label = (
+                    f"{provider}→{actual_provider}"
+                    if actual_provider != provider
                     else provider
                 )
-                
+
                 # Step 2f: Persist to DB (runs + llm_logs)
-                run_id      = None
+                run_id = None
                 llm_log_ids = []
                 if self.persistence:
                     sys_logger.info("Saving run to database...")
@@ -567,16 +682,20 @@ class AnalysisService:
                     run_id = self.persistence.save_run(
                         provider=provider_label,
                         result={
-                            "signal":          voting_result["final_signal"],
-                            "confidence":      voting_result["weighted_confidence"],
+                            "signal": voting_result["final_signal"],
+                            "confidence": voting_result["weighted_confidence"],
                             "voting_breakdown": voting_result["voting_breakdown"],
                             # ราคาจาก interval result (THB/gram)
-                            "entry_price":     interval_result.get("entry_price"),
-                            "stop_loss":       interval_result.get("stop_loss"),
-                            "take_profit":     interval_result.get("take_profit"),
-                            "react_trace":     interval_result.get("trace", []),
-                            "iterations_used": interval_result.get("iterations_used", 0),
-                            "tool_calls_used": interval_result.get("tool_calls_used", 0),
+                            "entry_price": interval_result.get("entry_price"),
+                            "stop_loss": interval_result.get("stop_loss"),
+                            "take_profit": interval_result.get("take_profit"),
+                            "react_trace": interval_result.get("trace", []),
+                            "iterations_used": interval_result.get(
+                                "iterations_used", 0
+                            ),
+                            "tool_calls_used": interval_result.get(
+                                "tool_calls_used", 0
+                            ),
                         },
                         market_state=market_state,
                         interval_tf=interval,
@@ -592,32 +711,33 @@ class AnalysisService:
                     sys_logger.info(
                         f"LLM logs saved: {len(llm_log_ids)} entries for run_id={run_id}"
                     )
-                
+
                 # ── Step 2g: Notify Discord  ──────────────
                 if self.discord_notifier:  # Fixed here
-                    sent = self.discord_notifier.notify( # Fixed here
-                        voting_result    = voting_result,
-                        interval_results = interval_results,
-                        market_state     = market_state,
-                        provider         = provider_label,
-                        period           = period,
-                        run_id = run_id,   # ยังไม่มี run_id ตอนนี้
+                    sent = self.discord_notifier.notify(  # Fixed here
+                        voting_result=voting_result,
+                        interval_results=interval_results,
+                        market_state=market_state,
+                        provider=provider_label,
+                        period=period,
+                        run_id=run_id,  # ยังไม่มี run_id ตอนนี้
                     )
                     if sent:
                         sys_logger.info("Discord notification sent ✅")
-                    elif self.discord_notifier.last_error: # Fixed here
+                    elif self.discord_notifier.last_error:  # Fixed here
                         sys_logger.warning(
-                            f"Discord notification failed: {self.discord_notifier.last_error}")
-                
-                # ── Step 2h: Notify Telegram  ──────────────        
+                            f"Discord notification failed: {self.discord_notifier.last_error}"
+                        )
+
+                # ── Step 2h: Notify Telegram  ──────────────
                 if self.telegram_notifier:
                     sent_telegram = self.telegram_notifier.notify(
                         voting_result=voting_result,
-                        interval_results=interval_results,  
-                        market_state=market_state,         
+                        interval_results=interval_results,
+                        market_state=market_state,
                         provider=provider_label,
                         period=period,
-                        run_id=run_id
+                        run_id=run_id,
                     )
                     if sent_telegram:
                         sys_logger.info("Telegram notification sent ✅")
@@ -625,32 +745,30 @@ class AnalysisService:
                         sys_logger.warning("Telegram notification failed or disabled")
 
                 return {
-                    "status":      "success",
+                    "status": "success",
                     "market_open": market_open,
                     "data": {
-                        "market_state":    market_state,
-                        "interval_results":interval_results,
+                        "market_state": market_state,
+                        "interval_results": interval_results,
                     },
                     "voting_result": voting_result,
-                    "run_id":        run_id,
-                    "llm_log_ids":   llm_log_ids,
-                    "attempt":       attempt,
+                    "run_id": run_id,
+                    "llm_log_ids": llm_log_ids,
+                    "attempt": attempt,
                 }
 
             except ValueError as e:
                 sys_logger.error(f"Validation error: {e}")
                 return {
-                    "status":     "error",
-                    "error":      str(e),
+                    "status": "error",
+                    "error": str(e),
                     "error_type": "validation",
-                    "attempt":    attempt,
+                    "attempt": attempt,
                 }
 
             except Exception as e:
                 last_error = e
-                sys_logger.warning(
-                    f"Attempt {attempt} failed: {type(e).__name__}: {e}"
-                )
+                sys_logger.warning(f"Attempt {attempt} failed: {type(e).__name__}: {e}")
                 if attempt < self.max_retries:
                     wait_time = SERVICE_CONFIG["retry_delay"] ** attempt
                     sys_logger.info(
@@ -662,14 +780,20 @@ class AnalysisService:
 
         sys_logger.error(f"Failed after {self.max_retries} attempts: {last_error}")
         return {
-            "status":     "error",
-            "error":      str(last_error),
+            "status": "error",
+            "error": str(last_error),
             "error_type": "api_failure",
-            "attempt":    self.max_retries,
+            "attempt": self.max_retries,
         }
 
     def _run_single_interval(
-        self, provider: str, market_state: dict, interval: str, *,bypass_session_gate: bool = False, ohlcv_df=None
+        self,
+        provider: str,
+        market_state: dict,
+        interval: str,
+        *,
+        bypass_session_gate: bool = False,
+        ohlcv_df=None,
     ) -> Dict:
         """Run analysis for single interval using ReAct loop with provider fallback chain"""
         t_start = time.time()
@@ -695,13 +819,17 @@ class AnalysisService:
             }
 
             OLLAMA_MODELS = [
-                "qwen3.5:9b", "qwen2.5:7b", "qwen2.5:3b",
-                "deepseek-r1:7b", "deepseek-r1:8b", "ollama",
+                "qwen3.5:9b",
+                "qwen2.5:7b",
+                "qwen2.5:3b",
+                "deepseek-r1:7b",
+                "deepseek-r1:8b",
+                "ollama",
             ]
 
             # openrouter colon syntax → map ไปยัง fallback chain ของตัวเอง
             # ถ้าไม่มีใน chain ให้ fallback เป็น [provider, "gemini", "mock"]
-            chain_key      = "ollama" if provider in OLLAMA_MODELS else provider
+            chain_key = "ollama" if provider in OLLAMA_MODELS else provider
             fallback_order = PROVIDER_FALLBACK_CHAIN.get(
                 chain_key, [chain_key, "gemini", "mock"]
             )
@@ -721,10 +849,13 @@ class AnalysisService:
                         sys_logger.info(
                             f"  Creating GeminiClient (variant): model={p} domain={domain}"
                         )
-                    elif p in OLLAMA_MODELS or (p == "ollama" and provider in OLLAMA_MODELS):
+                    elif p in OLLAMA_MODELS or (
+                        p == "ollama" and provider in OLLAMA_MODELS
+                    ):
                         model_name = provider if provider != "ollama" else "qwen3.5:9b"
                         client = LLMClientFactory.create(
-                            "ollama", model=model_name,
+                            "ollama",
+                            model=model_name,
                             base_url="http://localhost:11434",
                             temperature=0.1,
                         )
@@ -744,7 +875,9 @@ class AnalysisService:
                         if not model_config:
                             raise ValueError(f"Unknown OpenRouter model: {p}")
                         if not model_config.get("api_key"):
-                            raise ValueError(f"OPENROUTER_API_KEY not set in .env for {p}")
+                            raise ValueError(
+                                f"OPENROUTER_API_KEY not set in .env for {p}"
+                            )
                         sys_logger.info(
                             f"  Creating OpenRouter client (legacy): {p} "
                             f"(model={model_config['model_id']})"
@@ -771,15 +904,16 @@ class AnalysisService:
                 raise ValueError(
                     f"No provider in fallback chain available: {fallback_order}"
                 )
-            
+
             market_state["interval"] = interval
             gate_res = resolve_session_gate(force_bypass=bypass_session_gate)
-            
+
             _portfolio_for_gate = market_state.get("portfolio", {})
             _trades_this_session, _trades_this_session_source = (
                 self._resolve_session_trade_count(_portfolio_for_gate, gate_res)
             )
             if isinstance(_portfolio_for_gate, dict):
+                _portfolio_for_gate["entries_this_session"] = _trades_this_session
                 _portfolio_for_gate["trades_this_session"] = _trades_this_session
                 _portfolio_for_gate["trades_this_session_source"] = (
                     _trades_this_session_source
@@ -791,11 +925,11 @@ class AnalysisService:
             )
             # พิมพ์ออก Console โดยตรงเพื่อให้ตรวจสอบได้ง่าย
             print(
-                f"\n📊 [SESSION CHECK] Trades in this session: "
+                f"\n📊 [SESSION CHECK] BUY entries in this session: "
                 f"{_trades_this_session} ({_trades_this_session_source})"
             )
             sys_logger.info(
-                "[Session Quota] Resolved trades_this_session=%s source=%s "
+                "[Session Quota] Resolved entries_this_session=%s source=%s "
                 "session_start=%s",
                 _trades_this_session,
                 _trades_this_session_source,
@@ -808,23 +942,60 @@ class AnalysisService:
                 gold_grams=_gold_grams_for_gate,
             )
             _quota_source = (
-                market_state.get("execution_quota", {}).get("source")
-                or "database"
+                market_state.get("execution_quota", {}).get("source") or "database"
             )
+
+            # Reuse the SQL-derived count from the first quota build so the
+            # rebuild after SessionGate stays consistent — never fall back to
+            # the persisted portfolio.trades_today (which has no daily reset).
+            _prior_quota = market_state.get("execution_quota", {}) or {}
+            _entries_done_live: Optional[int] = None
+            _exits_done_live: Optional[int] = None
+            _total_trades_today_live: Optional[int] = None
+            if _prior_quota.get("entries_done_source") == "trade_log":
+                _entries_done_live = _prior_quota.get("entries_done")
+                _exits_done_live = _prior_quota.get("exits_done")
+                _total_trades_today_live = _prior_quota.get("total_trades_today")
+            elif self.persistence and hasattr(
+                self.persistence, "count_trades_today_thai"
+            ):
+                try:
+                    _entries_done_live = int(
+                        self.persistence.count_trades_today_thai(action="BUY") or 0
+                    )
+                    _exits_done_live = int(
+                        self.persistence.count_trades_today_thai(action="SELL") or 0
+                    )
+                    _total_trades_today_live = int(
+                        self.persistence.count_trades_today_thai() or 0
+                    )
+                except Exception as _quota_err:
+                    sys_logger.warning(
+                        "count_trades_today_thai failed in post-gate quota "
+                        "rebuild, falling back to portfolio.trades_today: %s",
+                        _quota_err,
+                    )
+                    _entries_done_live = None
+                    _exits_done_live = None
+                    _total_trades_today_live = None
+
             market_state["execution_quota"] = build_execution_quota_from_portfolio(
                 market_state.get("portfolio", {}),
                 session_gate=market_state.get("session_gate", {}),
                 source=_quota_source,
+                entries_done_override=_entries_done_live,
+                exits_done_override=_exits_done_live,
+                total_trades_today_override=_total_trades_today_live,
             )
             sys_logger.info(
                 "[ExecutionQuota] Finalized after SessionGate: source=%s "
-                "entries_done=%s trades_this_session=%s session=%s",
+                "entries_done=%s entries_this_session=%s session=%s",
                 _quota_source,
                 market_state["execution_quota"].get("entries_done"),
-                market_state["execution_quota"].get("trades_this_session"),
+                market_state["execution_quota"].get("entries_this_session"),
                 market_state["execution_quota"].get("session_id"),
             )
-            
+
             # ═══════════════════════════════════════════
             # GATE-2 │ services.py → หลัง data_orchestrator.run()
             # ═══════════════════════════════════════════
@@ -833,7 +1004,7 @@ class AnalysisService:
             # print("GATE-2 │ MARKET STATE RAW")
             # print(json.dumps(market_state, indent=2, ensure_ascii=False, default=str))
             # print("="*60 + "\n")
-            
+
             if gate_res.apply_gate:
                 sys_logger.info(
                     f"[{interval}] Session gate: session_id={gate_res.session_id} "
@@ -845,7 +1016,7 @@ class AnalysisService:
                     f"[{interval}] Session gate skipped "
                     f"(outside session window or bypass_session_gate={bypass_session_gate})"
                 )
-                
+
             # quota_urgent → ไม่วน ReAct/tool loop: fast path ใน react.py (max_tool_calls=0)
             # = merge prompt (build_final_decision) → LLM ครั้งเดียว → output
             quota_urgent_fast = bool(
@@ -855,13 +1026,13 @@ class AnalysisService:
                 sys_logger.info(
                     f"[{interval}] quota_urgent=True — LLM fast path only (no ReAct tool loop)"
                 )
-            
+
             _ts_str = (
                 market_state.get("market_data", {})
                 .get("spot_price_usd", {})
                 .get("timestamp", "")
             )
-            
+
             try:
                 _ts = datetime.fromisoformat(_ts_str)
                 market_state["time"] = _ts.strftime("%H:%M")
@@ -870,27 +1041,28 @@ class AnalysisService:
                 now = datetime.now()
                 market_state["time"] = now.strftime("%H:%M")
                 market_state["date"] = now.strftime("%Y-%m-%d")
-                
-                
+
             # ─── ATR Conversion: USD/oz → THB/baht_weight ───────────────
             try:
-                _ti        = market_state.get("technical_indicators", {})
-                _atr_node  = _ti.get("atr", {})
-                _atr_unit   = str(_atr_node.get("unit", ""))
+                _ti = market_state.get("technical_indicators", {})
+                _atr_node = _ti.get("atr", {})
+                _atr_unit = str(_atr_node.get("unit", ""))
                 if _atr_unit == "THB_PER_BAHT_GOLD":
                     sys_logger.info(
                         f"[{interval}] ATR already in THB_PER_BAHT_GOLD; "
                         "skipping USD/oz conversion"
                     )
                     raise StopIteration
-                _atr_usd   = float(_atr_node.get("value", 0))
-                _usd_thb   = float(
+                _atr_usd = float(_atr_node.get("value", 0))
+                _usd_thb = float(
                     market_state.get("market_data", {})
-                    .get("forex", {}).get("usd_thb", 0.0)
+                    .get("forex", {})
+                    .get("usd_thb", 0.0)
                 )
-                _spot      = float(
+                _spot = float(
                     market_state.get("market_data", {})
-                    .get("spot_price_usd", {}).get("price_usd_per_oz", 0)
+                    .get("spot_price_usd", {})
+                    .get("price_usd_per_oz", 0)
                 )
 
                 # Guard: ข้อมูลพร้อม?
@@ -902,15 +1074,15 @@ class AnalysisService:
                 # Stale check: ATR < 0.1% ของราคา = ข้อมูล stale มาก
                 if _spot > 0 and (_atr_usd / _spot) < 0.001:
                     sys_logger.warning(
-                        f"[{interval}] ATR unreliable (ratio={_atr_usd/_spot:.4%}) "
+                        f"[{interval}] ATR unreliable (ratio={_atr_usd / _spot:.4%}) "
                         f"- market likely closed or stale data"
                     )
 
                 _atr_thb = (_atr_usd * _usd_thb / 31.1035) * 15.244
 
                 # Mutation ที่ document ชัดเจน
-                _atr_node["value"]     = round(_atr_thb, 2)
-                _atr_node["unit"]      = "THB_PER_BAHT_WEIGHT"
+                _atr_node["value"] = round(_atr_thb, 2)
+                _atr_node["unit"] = "THB_PER_BAHT_WEIGHT"
                 _atr_node["value_usd"] = round(_atr_usd, 4)
 
                 sys_logger.info(
@@ -948,8 +1120,8 @@ class AnalysisService:
             # ── [MTF Phase 3] Auto-select AIRole based on detected market_regime ──
             _regime = str(market_state.get("market_regime", "UNKNOWN")).upper()
             _REGIME_TO_ROLE = {
-                "UPTREND":   AIRole.AGGRESSIVE_BULLISH,
-                "SIDEWAYS":  AIRole.RANGE_BOUND_SNIPER,
+                "UPTREND": AIRole.AGGRESSIVE_BULLISH,
+                "SIDEWAYS": AIRole.RANGE_BOUND_SNIPER,
                 "DOWNTREND": AIRole.DEFENSIVE_SCAVENGER,
             }
             _session_gate = market_state.get("session_gate", {}) or {}
@@ -982,11 +1154,16 @@ class AnalysisService:
                     max_iterations=3,
                     max_tool_calls=5,
                     readiness=ReadinessConfig(
-                        required_indicators=["rsi", "macd", "trend", "force_react_loop"],
+                        required_indicators=[
+                            "rsi",
+                            "macd",
+                            "trend",
+                            "force_react_loop",
+                        ],
                         require_htf=True,
                     ),
                 )
-                
+
             # print('TOOL REGISTY')
             # print(TOOL_REGISTRY)
             react_orchestrator = ReactOrchestrator(
@@ -996,26 +1173,34 @@ class AnalysisService:
                 config=react_config,
                 risk_manager=self.risk_manager,
             )
-            
+
             ## ═══════════════════════════════════════════
             # GATE-4 IN │ services.py → ก่อน react_orchestrator.run()
             # ═══════════════════════════════════════════
-            
+
             current_session = gate_res.session_id if gate_res.apply_gate else "Morning"
             is_market_open = gate_res.apply_gate
 
             # 2. สร้าง Predictor
             predictor = XGBoostPredictor(
                 repo_id="athiphatss/Xgboost_HSH965_gold_trading_signal",
-                filename="feature_columns.json"
+                filename="feature_columns.json",
             )
 
             # 3. เตรียม features_dict
             features_dict = {
-                "xauusd_open": market_state.get("market_data", {}).get("ohlcv", {}).get("open", 0.0),
-                "xauusd_high": market_state.get("market_data", {}).get("ohlcv", {}).get("high", 0.0),
-                "xauusd_low": market_state.get("market_data", {}).get("ohlcv", {}).get("low", 0.0),
-                "xauusd_close": market_state.get("market_data", {}).get("ohlcv", {}).get("close", 0.0),
+                "xauusd_open": market_state.get("market_data", {})
+                .get("ohlcv", {})
+                .get("open", 0.0),
+                "xauusd_high": market_state.get("market_data", {})
+                .get("ohlcv", {})
+                .get("high", 0.0),
+                "xauusd_low": market_state.get("market_data", {})
+                .get("ohlcv", {})
+                .get("low", 0.0),
+                "xauusd_close": market_state.get("market_data", {})
+                .get("ohlcv", {})
+                .get("close", 0.0),
                 "hour_sin": np.sin(2 * np.pi * datetime.now().hour / 24),
                 "hour_cos": np.cos(2 * np.pi * datetime.now().hour / 24),
                 "day_of_week": datetime.now().weekday(),
@@ -1024,16 +1209,29 @@ class AnalysisService:
             # 4. รัน Predictor เพื่อเอา XGBoost Signal
             xgb_out = predictor.predict(features_dict, session=current_session)
             # print(xgb_out)
-            
+
             # --- [NEW] 5. คำนวณ Dynamic Weights ---
             # ดึงทิศทางจาก 3 แหล่ง
             xgb_dir = str(getattr(xgb_out, "signal", "HOLD")).upper()
-            
+
             news_score = market_state.get("news", {}).get("sentiment_score", 0.0)
-            news_dir = "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
-            
-            tech_trend = market_state.get("technical_indicators", {}).get("trend", {}).get("trend", "").lower()
-            tech_dir = "BUY" if "up" in tech_trend else "SELL" if "down" in tech_trend else "HOLD"
+            news_dir = (
+                "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
+            )
+
+            tech_trend = (
+                market_state.get("technical_indicators", {})
+                .get("trend", {})
+                .get("trend", "")
+                .lower()
+            )
+            tech_dir = (
+                "BUY"
+                if "up" in tech_trend
+                else "SELL"
+                if "down" in tech_trend
+                else "HOLD"
+            )
 
             # กำหนดน้ำหนักตาม Session
             if is_market_open and current_session == "Evening":
@@ -1045,15 +1243,21 @@ class AnalysisService:
 
             # คำนวณคะแนน
             bull_score, bear_score = 0.0, 0.0
-            
-            if xgb_dir == "BUY": bull_score += w_xgb
-            elif xgb_dir == "SELL": bear_score += w_xgb
-            
-            if news_dir == "BUY": bull_score += w_news
-            elif news_dir == "SELL": bear_score += w_news
-            
-            if tech_dir == "BUY": bull_score += w_tech
-            elif tech_dir == "SELL": bear_score += w_tech
+
+            if xgb_dir == "BUY":
+                bull_score += w_xgb
+            elif xgb_dir == "SELL":
+                bear_score += w_xgb
+
+            if news_dir == "BUY":
+                bull_score += w_news
+            elif news_dir == "SELL":
+                bear_score += w_news
+
+            if tech_dir == "BUY":
+                bull_score += w_tech
+            elif tech_dir == "SELL":
+                bear_score += w_tech
 
             # สรุปผล
             if bull_score > bear_score:
@@ -1062,7 +1266,12 @@ class AnalysisService:
                 final_dir, base_conf = "SELL", bear_score
             else:
                 # ถ้าคะแนนเท่ากัน ให้ใช้ค่าเฉลี่ยของน้ำหนักที่เหลืออยู่ แทนการล็อค 0.5
-                final_dir, base_conf = "HOLD", (bull_score + bear_score) / 2 if (bull_score + bear_score) > 0 else 0.35
+                final_dir, base_conf = (
+                    "HOLD",
+                    (bull_score + bear_score) / 2
+                    if (bull_score + bear_score) > 0
+                    else 0.35,
+                )
 
             # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
             market_state["dynamic_weights"] = {
@@ -1071,13 +1280,14 @@ class AnalysisService:
                 "news_w": w_news,
                 "tech_w": w_tech,
                 "direction": final_dir,
-                "base_confidence": round(base_conf, 2)
+                "base_confidence": round(base_conf, 2),
             }
-            
+
             slim_state = self.data_orchestrator.pack(market_state)
 
-            _portfolio_trades = (
-                market_state.get("portfolio", {}).get("trades_this_session")
+            _portfolio_trades = market_state.get("portfolio", {}).get(
+                "entries_this_session",
+                market_state.get("portfolio", {}).get("trades_this_session"),
             )
             _session_gate = market_state.get("session_gate", {}) or {}
             _execution_quota = market_state.get("execution_quota", {}) or {}
@@ -1086,60 +1296,94 @@ class AnalysisService:
             _session_gate_present = bool(market_state.get("session_gate"))
             _slim_session_gate_present = bool(slim_state.get("session_gate"))
             _session_gate_trades = (
-                _session_gate.get("trades_this_session")
+                _session_gate.get(
+                    "entries_this_session",
+                    _session_gate.get("trades_this_session"),
+                )
                 if _session_gate_present
                 else _portfolio_trades
             )
             _slim_session_gate_trades = (
-                _slim_session_gate.get("trades_this_session")
+                _slim_session_gate.get(
+                    "entries_this_session",
+                    _slim_session_gate.get("trades_this_session"),
+                )
                 if _slim_session_gate_present
                 else _portfolio_trades
             )
             _pre_llm_state_check = {
+                "portfolio.entries_this_session": _portfolio_trades,
                 "portfolio.trades_this_session": _portfolio_trades,
+                "portfolio.trades_today": market_state.get("portfolio", {}).get(
+                    "trades_today"
+                ),
                 "session_gate.present": _session_gate_present,
                 "session_gate.apply_gate": _session_gate.get("apply_gate", False),
                 "session_gate.trades_this_session": _session_gate_trades,
-                "execution_quota.trades_this_session": _execution_quota.get("trades_this_session"),
+                "session_gate.entries_this_session": _session_gate.get(
+                    "entries_this_session"
+                ),
+                "execution_quota.entries_done": _execution_quota.get("entries_done"),
+                "execution_quota.daily_target_entries": _execution_quota.get(
+                    "daily_target_entries"
+                ),
+                "execution_quota.quota_met": _execution_quota.get("quota_met"),
+                "execution_quota.trades_this_session": _execution_quota.get(
+                    "trades_this_session"
+                ),
+                "execution_quota.entries_this_session": _execution_quota.get(
+                    "entries_this_session"
+                ),
                 "session_gate.emergency_mode": _session_gate.get("emergency_mode"),
                 "execution_quota.source": _execution_quota.get("source"),
                 "slim_state.session_gate.present": _slim_session_gate_present,
+                "slim_state.session_gate.entries_this_session": _slim_session_gate.get(
+                    "entries_this_session"
+                ),
                 "slim_state.session_gate.trades_this_session": _slim_session_gate_trades,
-                "slim_state.execution_quota.trades_this_session": _slim_execution_quota.get("trades_this_session"),
-                "slim_state.session_gate.emergency_mode": _slim_session_gate.get("emergency_mode"),
-                "slim_state.execution_quota.source": _slim_execution_quota.get("source"),
+                "slim_state.execution_quota.entries_this_session": _slim_execution_quota.get(
+                    "entries_this_session"
+                ),
+                "slim_state.execution_quota.trades_this_session": _slim_execution_quota.get(
+                    "trades_this_session"
+                ),
+                "slim_state.session_gate.emergency_mode": _slim_session_gate.get(
+                    "emergency_mode"
+                ),
+                "slim_state.execution_quota.source": _slim_execution_quota.get(
+                    "source"
+                ),
                 "aligned": (
                     _portfolio_trades
                     == _session_gate_trades
-                    == _execution_quota.get("trades_this_session")
+                    == _execution_quota.get("entries_this_session")
                     == _slim_session_gate_trades
-                    == _slim_execution_quota.get("trades_this_session")
+                    == _slim_execution_quota.get("entries_this_session")
                 ),
             }
             sys_logger.info(
                 "[PreLLM StateCheck] %s",
                 json.dumps(_pre_llm_state_check, ensure_ascii=False, default=str),
             )
-            
+
             react_result = react_orchestrator.run(
-                market_state=slim_state,
-                ohlcv_df=ohlcv_df
+                market_state=slim_state, ohlcv_df=ohlcv_df
             )
 
             # react_result = react_orchestrator.run(market_state)
-            
+
             # ═══════════════════════════════════════════
             # GATE-4 OUT │ services.py → หลัง react_orchestrator.run()
             # ═══════════════════════════════════════════
             # print("\n" + "="*60)
             # print("GATE-4 OUT │ REACT RESULT")
             # print(json.dumps(react_result, indent=2, ensure_ascii=False, default=str))
-            # print("="*60 + "\n") 
-            
-            elapsed_ms   = int((time.time() - t_start) * 1000)
+            # print("="*60 + "\n")
+
+            elapsed_ms = int((time.time() - t_start) * 1000)
 
             used_provider = llm_client.active_provider
-            fallback_log  = llm_client.errors
+            fallback_log = llm_client.errors
 
             if fallback_log:
                 sys_logger.warning(
@@ -1163,13 +1407,18 @@ class AnalysisService:
             if isinstance(decision, str):
                 try:
                     decision = json.loads(decision)
-                    sys_logger.warning(f"[{interval}] final_decision was a JSON string — parsed OK")
+                    sys_logger.warning(
+                        f"[{interval}] final_decision was a JSON string — parsed OK"
+                    )
                 except (json.JSONDecodeError, TypeError):
-                    sys_logger.error(f"[{interval}] final_decision string cannot be parsed: {decision!r}")
+                    sys_logger.error(
+                        f"[{interval}] final_decision string cannot be parsed: {decision!r}"
+                    )
                     decision = {}
 
             # ─── Inject time/date ────────────────────────────────────────
             from datetime import datetime as _dt
+
             try:
                 _ts = _dt.fromisoformat(_ts_str)
                 market_state["time"] = _ts.strftime("%H:%M")
@@ -1179,70 +1428,75 @@ class AnalysisService:
                 market_state["time"] = _now.strftime("%H:%M")
                 market_state["date"] = _now.strftime("%Y-%m-%d")
 
-            final_decision =  decision
+            final_decision = decision
 
             return {
-                "signal":          final_decision.get("signal", "HOLD"),
-                "confidence":      final_decision.get("confidence", 0.0),
-                "reasoning":       final_decision.get("rationale", ""),
-                "rationale":       final_decision.get("rationale", ""),
-                "entry_price":     final_decision.get("entry_price"),
-                "stop_loss":       final_decision.get("stop_loss"),
-                "take_profit":     final_decision.get("take_profit"),
+                "signal": final_decision.get("signal", "HOLD"),
+                "confidence": final_decision.get("confidence", 0.0),
+                "reasoning": final_decision.get("rationale", ""),
+                "rationale": final_decision.get("rationale", ""),
+                "entry_price": final_decision.get("entry_price"),
+                "stop_loss": final_decision.get("stop_loss"),
+                "take_profit": final_decision.get("take_profit"),
                 "rejection_reason": final_decision.get("rejection_reason"),
                 # metadata เดิมคงไว้
-                "trace":           react_result.get("react_trace", []),
-                "provider_used":   used_provider,
-                "fallback_log":    fallback_log,
-                "is_fallback":     bool(fallback_log),
-                "fallback_from":   fallback_log[0]["provider"] if fallback_log else None,
-                "elapsed_ms":      elapsed_ms,
-                "token_input":     react_result.get("token_input"),
-                "token_output":    react_result.get("token_output"),
-                "token_total":     react_result.get("token_total"),
+                "trace": react_result.get("react_trace", []),
+                "provider_used": used_provider,
+                "fallback_log": fallback_log,
+                "is_fallback": bool(fallback_log),
+                "fallback_from": fallback_log[0]["provider"] if fallback_log else None,
+                "elapsed_ms": elapsed_ms,
+                "token_input": react_result.get("token_input"),
+                "token_output": react_result.get("token_output"),
+                "token_total": react_result.get("token_total"),
                 "iterations_used": react_result.get("iterations_used", 0),
                 "tool_calls_used": react_result.get("tool_calls_used", 0),
-                "full_prompt":     react_result.get("prompt_text"),
-                "full_response":   react_result.get("response_raw"),
+                "full_prompt": react_result.get("prompt_text"),
+                "full_response": react_result.get("response_raw"),
             }
 
         except Exception as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
-            
+
             import traceback
+
             sys_logger.error(f"FULL TRACEBACK:\n{traceback.format_exc()}")
-    
+
             sys_logger.error(
                 f"Error analyzing interval {interval}: {type(e).__name__}: {e}"
             )
             return {
-                "signal":          "HOLD",
-                "confidence":      0.0,
-                "reasoning":       f"Analysis failed: {str(e)}",
-                "rationale":       f"Analysis failed: {str(e)}",
-                "entry_price":     None,
-                "stop_loss":       None,
-                "take_profit":     None,
-                "trace":           [],
-                "provider_used":   "none",
-                "fallback_log":    [],
-                "is_fallback":     False,
-                "fallback_from":   None,
-                "elapsed_ms":      elapsed_ms,
-                "token_input":     None,
-                "token_output":    None,
-                "token_total":     None,
+                "signal": "HOLD",
+                "confidence": 0.0,
+                "reasoning": f"Analysis failed: {str(e)}",
+                "rationale": f"Analysis failed: {str(e)}",
+                "entry_price": None,
+                "stop_loss": None,
+                "take_profit": None,
+                "trace": [],
+                "provider_used": "none",
+                "fallback_log": [],
+                "is_fallback": False,
+                "fallback_from": None,
+                "elapsed_ms": elapsed_ms,
+                "token_input": None,
+                "token_output": None,
+                "token_total": None,
                 "iterations_used": 0,
                 "tool_calls_used": 0,
-                "full_prompt":     None,
-                "full_response":   None,
+                "full_prompt": None,
+                "full_response": None,
             }
 
     def _validate_inputs(
         self, provider: str, period: str, intervals: List[str]
     ) -> Optional[str]:
         """Validate input parameters. Return error message if invalid, None if OK"""
-        from ui.core.config import validate_provider, validate_period, validate_intervals
+        from ui.core.config import (
+            validate_provider,
+            validate_period,
+            validate_intervals,
+        )
 
         if not validate_provider(provider):
             return f"Invalid provider: {provider}"
@@ -1258,12 +1512,15 @@ class AnalysisService:
 
         return None
 
-    def _resolve_session_trade_count(self, portfolio: dict, gate_res) -> tuple[int, str]:
+    def _resolve_session_trade_count(
+        self, portfolio: dict, gate_res
+    ) -> tuple[int, str]:
         """
-        Resolve trades_this_session from trade_log for the active session.
+        Resolve BUY entries in the active session from trade_log.
 
-        portfolio.trades_this_session is treated as a fallback only. A NULL value
-        is never allowed to imply "zero trades" while a DB session can be counted.
+        portfolio.trades_this_session is a legacy BUY-entry alias and is treated
+        as fallback only. A NULL value is never allowed to imply "zero BUY
+        entries" while a DB session can be counted.
         """
         if not getattr(gate_res, "apply_gate", False):
             return 0, "outside_session"
@@ -1277,7 +1534,13 @@ class AnalysisService:
             try:
                 count = max(
                     0,
-                    int(self.persistence.get_trades_count_since(session_start_iso) or 0),
+                    int(
+                        self.persistence.get_trades_count_since(
+                            session_start_iso,
+                            action="BUY",
+                        )
+                        or 0
+                    ),
                 )
                 if hasattr(self.persistence, "update_trades_this_session"):
                     try:
@@ -1285,24 +1548,28 @@ class AnalysisService:
                     except Exception as sync_exc:
                         sys_logger.warning(
                             "[Session Quota] Could not sync "
-                            "portfolio.trades_this_session=%s: %s",
+                            "portfolio.trades_this_session legacy BUY entries=%s: %s",
                             count,
                             sync_exc,
                         )
                 return count, "trade_log"
             except Exception as exc:
                 sys_logger.warning(
-                    "[Session Quota] Could not count trades from trade_log "
+                    "[Session Quota] Could not count BUY entries from trade_log "
                     "since %s: %s",
                     session_start_iso,
                     exc,
                 )
 
-        raw_count = portfolio.get("trades_this_session") if isinstance(portfolio, dict) else None
+        raw_count = (
+            portfolio.get("trades_this_session")
+            if isinstance(portfolio, dict)
+            else None
+        )
         if raw_count is None:
             sys_logger.warning(
-                "[Session Quota] portfolio.trades_this_session is NULL and "
-                "trade_log count is unavailable; using explicit 0 fallback"
+                "[Session Quota] portfolio.trades_this_session legacy BUY entry "
+                "count is NULL and trade_log count is unavailable; using explicit 0 fallback"
             )
         return max(0, _safe_int(raw_count, 0)), "portfolio_fallback"
 
@@ -1357,38 +1624,41 @@ class AnalysisService:
 # LLM Log Extractor (helper)
 # ─────────────────────────────────────────────
 
+
 def _extract_llm_log(interval_result: dict, interval: str) -> dict:
     """
     สกัด llm_log data จาก interval_result
     สำหรับบันทึกลง llm_logs table
     """
-    fallback_log  = interval_result.get("fallback_log", [])
-    is_fallback   = bool(fallback_log)
+    fallback_log = interval_result.get("fallback_log", [])
+    is_fallback = bool(fallback_log)
     fallback_from = fallback_log[0]["provider"] if fallback_log else None
 
     return {
-        "interval_tf":     interval,
-        "step_type":       "THOUGHT_FINAL",
-        "iteration":       interval_result.get("iterations_used", 0),
-        "provider":        interval_result.get("provider_used", ""),
-        "signal":          interval_result.get("signal", "HOLD"),
-        "confidence":      interval_result.get("confidence", 0.0),
-        "rationale":       interval_result.get("rationale", interval_result.get("reasoning", "")),
-        "entry_price":     interval_result.get("entry_price"),   # THB/gram
-        "stop_loss":       interval_result.get("stop_loss"),
-        "take_profit":     interval_result.get("take_profit"),
-        "trace_json":      interval_result.get("trace", []),
-        "token_input":     interval_result.get("token_input"),
-        "token_output":    interval_result.get("token_output"),
-        "token_total":     interval_result.get("token_total"),
-        "elapsed_ms":      interval_result.get("elapsed_ms"),
+        "interval_tf": interval,
+        "step_type": "THOUGHT_FINAL",
+        "iteration": interval_result.get("iterations_used", 0),
+        "provider": interval_result.get("provider_used", ""),
+        "signal": interval_result.get("signal", "HOLD"),
+        "confidence": interval_result.get("confidence", 0.0),
+        "rationale": interval_result.get(
+            "rationale", interval_result.get("reasoning", "")
+        ),
+        "entry_price": interval_result.get("entry_price"),  # THB/gram
+        "stop_loss": interval_result.get("stop_loss"),
+        "take_profit": interval_result.get("take_profit"),
+        "trace_json": interval_result.get("trace", []),
+        "token_input": interval_result.get("token_input"),
+        "token_output": interval_result.get("token_output"),
+        "token_total": interval_result.get("token_total"),
+        "elapsed_ms": interval_result.get("elapsed_ms"),
         "iterations_used": interval_result.get("iterations_used", 0),
         "tool_calls_used": interval_result.get("tool_calls_used", 0),
-        "is_fallback":     is_fallback,
-        "fallback_from":   fallback_from,
+        "is_fallback": is_fallback,
+        "fallback_from": fallback_from,
         # จะมีข้อมูลเมื่อ react.py expose ออกมา
-        "full_prompt":     interval_result.get("full_prompt"),
-        "full_response":   interval_result.get("full_response"),
+        "full_prompt": interval_result.get("full_prompt"),
+        "full_response": interval_result.get("full_response"),
     }
 
 
@@ -1415,21 +1685,21 @@ class PortfolioService:
     ) -> Dict:
         try:
             portfolio_data = {
-                "cash_balance":      float(cash),
-                "gold_grams":        float(gold_grams),
-                "cost_basis_thb":    float(cost_basis),
+                "cash_balance": float(cash),
+                "gold_grams": float(gold_grams),
+                "cost_basis_thb": float(cost_basis),
                 "current_value_thb": float(current_value),
-                "unrealized_pnl":    float(pnl),
-                "trades_today":      int(trades_today),
-                "updated_at":        datetime.now(timezone.utc).isoformat(),
+                "unrealized_pnl": float(pnl),
+                "trades_today": int(trades_today),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
             is_valid, error_msg = validate_portfolio_update(None, portfolio_data)
             if not is_valid:
                 return {
-                    "status":  "error",
+                    "status": "error",
                     "message": f"Validation failed: {error_msg}",
-                    "error":   error_msg,
+                    "error": error_msg,
                 }
 
             self.db.save_portfolio(portfolio_data)
@@ -1438,17 +1708,17 @@ class PortfolioService:
             )
 
             return {
-                "status":  "success",
+                "status": "success",
                 "message": "✅ Portfolio saved successfully",
-                "data":    portfolio_data,
+                "data": portfolio_data,
             }
 
         except Exception as e:
             sys_logger.error(f"Error saving portfolio: {type(e).__name__}: {e}")
             return {
-                "status":  "error",
+                "status": "error",
                 "message": f"Failed to save: {e}",
-                "error":   str(e),
+                "error": str(e),
             }
 
     def load_portfolio(self) -> Dict:
@@ -1468,8 +1738,8 @@ class PortfolioService:
             sys_logger.error(f"Error loading portfolio: {type(e).__name__}: {e}")
             return {
                 "status": "error",
-                "data":   DEFAULT_PORTFOLIO.copy(),
-                "error":  str(e),
+                "data": DEFAULT_PORTFOLIO.copy(),
+                "error": str(e),
             }
 
 
@@ -1505,8 +1775,12 @@ class HistoryService:
         except Exception as e:
             sys_logger.error(f"Error computing stats: {type(e).__name__}: {e}")
             return {
-                "total": 0, "buy_count": 0, "sell_count": 0,
-                "hold_count": 0, "avg_confidence": 0.0, "avg_price": 0.0,
+                "total": 0,
+                "buy_count": 0,
+                "sell_count": 0,
+                "hold_count": 0,
+                "avg_confidence": 0.0,
+                "avg_price": 0.0,
             }
 
     def get_run_detail(self, run_id: int) -> Dict:
@@ -1547,7 +1821,7 @@ class HistoryService:
         except Exception as e:
             sys_logger.error(f"Error fetching recent llm_logs: {type(e).__name__}: {e}")
             return []
-    
+
     def get_llm_logs_for_run(self, run_id: int) -> list:
         return self.db.get_llm_logs_for_run(run_id)
 
@@ -1559,7 +1833,7 @@ class HistoryService:
 
 def init_services(skill_registry, role_registry, data_orchestrator, db):
     """Initialize all services with dependency injection"""
- 
+
     # สร้าง notifier instances
     discord_notifier = DiscordNotifier()
     sys_logger.info(
@@ -1575,24 +1849,24 @@ def init_services(skill_registry, role_registry, data_orchestrator, db):
         f"enabled={telegram_notifier.enabled}, "
         f"token_set={bool(telegram_notifier.token)}"
     )
- 
+
     analysis_service = AnalysisService(
-        skill_registry    = skill_registry,
-        role_registry     = role_registry,
-        data_orchestrator = data_orchestrator,
-        persistence       = db,
-        discord_notifier  = discord_notifier,    # ← INJECT DISCORD
-        telegram_notifier = telegram_notifier,   # ← INJECT TELEGRAM
+        skill_registry=skill_registry,
+        role_registry=role_registry,
+        data_orchestrator=data_orchestrator,
+        persistence=db,
+        discord_notifier=discord_notifier,  # ← INJECT DISCORD
+        telegram_notifier=telegram_notifier,  # ← INJECT TELEGRAM
     )
     portfolio_service = PortfolioService(db)
-    history_service   = HistoryService(db)
- 
+    history_service = HistoryService(db)
+
     sys_logger.info("All services initialized successfully")
- 
+
     return {
-        "analysis":  analysis_service,
+        "analysis": analysis_service,
         "portfolio": portfolio_service,
-        "history":   history_service,
-        "discord_notifier":  discord_notifier,
+        "history": history_service,
+        "discord_notifier": discord_notifier,
         "telegram_notifier": telegram_notifier,
     }

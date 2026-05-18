@@ -24,8 +24,8 @@ def main():
     # REASON : Rule Compliance Override: Forced execution to meet minimum trading requirements before the deadline.
     # =====================================================
     ACTION = "BUY"
-    PRICE = 71120  # เปลี่ยนเป็นตัวเลขราคาได้ เช่น 2650.50
-    REASON = "MACD Hook confirmed (hist_now > hist_prev) with RSI rising. HTF is bearish, so confidence is capped, but 15m momentum supports a scalp entry."
+    PRICE = 70400  # เปลี่ยนเป็นตัวเลขราคาได้ เช่น 2650.50
+    REASON = "[SESSION FORCE BUY] price action remains flat with insufficient volatility, triggering a forced BUY to satisfy trading activity requirements."
     # =====================================================
 
     team_api_key = os.getenv("TEAM_API_KEY")

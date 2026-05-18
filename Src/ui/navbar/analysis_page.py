@@ -471,7 +471,7 @@ def _render_market_state(state: dict) -> str:
       <tr><td style="padding:4px 0;color:#5a6270">Cost basis</td><td style="text-align:right;color:#5a6270">฿{cost_basis:,.2f}</td></tr>
       <tr><td style="padding:4px 0;color:#5a6270">Current value</td><td style="text-align:right;font-weight:500;color:#2c2c2a">฿{current_value:,.2f}</td></tr>
       <tr><td style="padding:4px 0;color:#5a6270">Unrealized PnL</td><td style="text-align:right;font-weight:500;color:{pnl_color}">฿{pnl:,.2f}</td></tr>
-      <tr><td style="padding:4px 0;color:#5a6270">Trades today</td><td style="text-align:right;color:#2c2c2a">{trades}</td></tr>
+      <tr><td style="padding:4px 0;color:#5a6270">BUY entries today</td><td style="text-align:right;color:#2c2c2a">{trades}</td></tr>
     </table>
     <div style="background:#{"EAF3DE" if can_buy else "FCEBEB"};border-radius:7px;padding:7px;margin-top:8px;font-size:11px;color:#{"27500A" if can_buy else "791F1F"}">
       {"Can enter 1 buy position (min ฿1,010)" if can_buy else f"Cannot buy — need ฿{1010 - cash:.0f} more"}

@@ -395,7 +395,7 @@ class PortfolioRenderer:
                        accent_color=DT["primary"], accent_border=True)}
             {stat_card("Net P&L", f"{pnl_sign}฿{abs(pnl):,.0f}", f"ROI: {roi:+.1f}%",
                        accent_color=pnl_color)}
-            {stat_card("Trades Today", str(int(trades)), "")}
+            {stat_card("BUY Entries Today", str(int(trades)), "")}
         </div>"""
 
         # Allocation bar

@@ -250,6 +250,15 @@ class AgentDecision(BaseModel):
     def infer_action(cls, values):
         """ถ้า LLM ตอบแค่ signal โดยไม่มี action → infer เป็น FINAL_DECISION"""
         if isinstance(values, dict):
+            action_value = values.get("action")
+            if isinstance(action_value, str):
+                normalized_action = action_value.upper()
+                if normalized_action in {"BUY", "SELL", "HOLD"}:
+                    values["signal"] = values.get("signal") or normalized_action
+                    values["action"] = "FINAL_DECISION"
+                elif normalized_action in {"CALL_TOOL", "CALL_TOOLS", "FINAL_DECISION"}:
+                    values["action"] = normalized_action
+
             # normalize alias keys from heterogeneous model outputs
             if "tools_args" in values and "tool_args" not in values:
                 values["tool_args"] = values.get("tools_args")

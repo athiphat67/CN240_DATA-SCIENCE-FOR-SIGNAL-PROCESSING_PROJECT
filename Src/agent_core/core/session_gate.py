@@ -26,13 +26,13 @@ URGENT_MINUTES_DEFAULT = 15
 # Stage 2 (Forced):   ≤ 45 min left  → bypass LLM confidence/edge/HTF gates
 #                                       (absolute safety gates still enforced
 #                                       in risk.py: cash, holding, daily loss).
-EMERGENCY_BUY_RELAX_MINUTES = 60
+EMERGENCY_BUY_RELAX_MINUTES = 90
 EMERGENCY_BUY_FORCE_MINUTES = 45
 EMERGENCY_BUY_MAX_TRADES_THIS_SESSION = 0
 # Backward-compat alias — some external callers may still import this name.
 EMERGENCY_BUY_MINUTES = EMERGENCY_BUY_RELAX_MINUTES
 
-EMERGENCY_SELL_MINUTES = 8
+EMERGENCY_SELL_MINUTES = 10
 
 # วันจันทร์=0 ... อาทิตย์=6
 _WEEKEND_DAYS = {5, 6}
@@ -95,7 +95,8 @@ class SessionGateResult:
             "llm_mode": self.llm_mode,
             "suggested_min_confidence": self.suggested_min_confidence,
             "notes": list(self.notes),
-            "trades_this_session": 0,  # ✅ default; inject จริงผ่าน attach_session_gate_to_market_state
+            "entries_this_session": 0,
+            "trades_this_session": 0,  # Legacy alias for BUY-entry count.
             "is_emergency_buy": False,
             "is_emergency_sell": False,
             # Progressive stage: None | "relaxed" | "forced".
@@ -147,7 +148,7 @@ def resolve_session_gate(
         ข้อมูลเสริม (ไม่บังคับ) เช่น จำนวนไม้ที่ทำแล้ว — ใช้แค่ใส่ใน notes ไม่บล็อกการเทรด
     """
     notes: List[str] = [
-        "Minimum per-session trade counts are informational; recommending BUY/SELL beyond quota is allowed.",
+        "Minimum per-session BUY entry counts are informational; recommending BUY/SELL beyond quota is allowed.",
     ]
 
     if force_bypass:
@@ -257,7 +258,10 @@ def attach_session_gate_to_market_state(
     """อัปเดต market_state ในก้อนเดียว — ลบ key ถ้าไม่ใช้ gate"""
     if result.apply_gate:
         d = result.to_market_dict()
-        d["trades_this_session"] = trades_this_session  # inject ค่าจริง
+        # Canonical BUY-entry count for the active session. Keep
+        # trades_this_session as a legacy alias for compatibility.
+        d["entries_this_session"] = trades_this_session
+        d["trades_this_session"] = trades_this_session  # legacy BUY-entry alias
         mins_left = d.get("minutes_to_session_end")
         held_gold = float(gold_grams or 0.0)
 
@@ -270,7 +274,7 @@ def attach_session_gate_to_market_state(
         # Progressive Emergency Buy Mode — staged by minutes left.
         #   forced  : mins_left ≤ EMERGENCY_BUY_FORCE_MINUTES  (most urgent)
         #   relaxed : mins_left ≤ EMERGENCY_BUY_RELAX_MINUTES  (looser gates)
-        # Both require: zero trades this session AND no gold currently held.
+        # Both require: zero BUY entries this session AND no gold currently held.
         emergency_buy_stage: Optional[str] = None
         if (
             not is_emergency_sell
@@ -298,7 +302,7 @@ def attach_session_gate_to_market_state(
             d["emergency_mode"] = "forced_buy"
             d["emergency_reason"] = (
                 f"[FORCED] Session ends in {mins_left} mins "
-                f"(≤ {EMERGENCY_BUY_FORCE_MINUTES}) and zero trades completed "
+                f"(≤ {EMERGENCY_BUY_FORCE_MINUTES}) and zero BUY entries completed "
                 f"— FORCED buy stage."
             )
         elif emergency_buy_stage == "relaxed":
@@ -310,7 +314,7 @@ def attach_session_gate_to_market_state(
             d["emergency_mode"] = "forced_buy"
             d["emergency_reason"] = (
                 f"[RELAXED] Session ends in {mins_left} mins "
-                f"(≤ {EMERGENCY_BUY_RELAX_MINUTES}) and zero trades completed "
+                f"(≤ {EMERGENCY_BUY_RELAX_MINUTES}) and zero BUY entries completed "
                 f"— RELAXED buy stage."
             )
         market_state["session_gate"] = d
