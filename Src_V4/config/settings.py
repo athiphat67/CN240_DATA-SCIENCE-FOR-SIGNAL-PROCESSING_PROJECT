@@ -24,6 +24,16 @@ PURITY_GLOBAL_GOLD  = 0.995
 CONV_FACTOR         = (WEIGHT_TH_BAHT / WEIGHT_TROY_OUNCE) * (PURITY_TH_GOLD / PURITY_GLOBAL_GOLD)
 # ≈ 0.4744
 
+# USD/oz → THB/baht-gold weight (ไม่รวม purity, ตรงกับ app.py สูตร F_Historical_Vol_THB)
+ATR_USD_TO_THB_WEIGHT = WEIGHT_TH_BAHT / WEIGHT_TROY_OUNCE  # ≈ 0.4901
+
+
+def convert_atr_usd_to_thb(atr_usd: float, usd_thb_rate: float) -> float:
+    """แปลง ATR (USD/oz) → THB/บาททอง โดย atr_usd × (15.244/31.1035) × USD_THB"""
+    if atr_usd is None or usd_thb_rate is None or atr_usd <= 0 or usd_thb_rate <= 0:
+        return 0.0
+    return atr_usd * ATR_USD_TO_THB_WEIGHT * usd_thb_rate
+
 # ─── State ────────────────────────────────────────────────────────────────────
 STATE_EMPTY   = "EMPTY"             # ไม่มีทองในมือ → อนุญาตเฉพาะ BUY
 STATE_HOLDING = "HOLDING"           # มีทองในมืออยู่ → อนุญาตเฉพาะ SELL
