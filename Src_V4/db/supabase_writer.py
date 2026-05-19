@@ -117,6 +117,43 @@ def _freshness_cutoff_iso() -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=PENDING_FRESHNESS_HOURS)).isoformat()
 
 
+def expire_stale_pending_signals() -> int:
+    """
+    Roll off PENDING signals older than PENDING_FRESHNESS_HOURS to status=EXPIRED.
+
+    Prevents ghost rows accumulating in the DB. Idempotent — safe to call each bar.
+    Returns the number of rows updated, or 0 on error / DRY_RUN.
+    """
+    if DRY_RUN:
+        logger.info(
+            f"[DRY_RUN] Would expire pending signals older than "
+            f"{PENDING_FRESHNESS_HOURS}h"
+        )
+        return 0
+
+    cutoff_iso = _freshness_cutoff_iso()
+    try:
+        res = (
+            get_supabase_client()
+            .table(SIGNALS_TABLE)
+            .update({
+                "execution_status": "EXPIRED",
+                "updated_at": "now()",
+                "confirm_note": f"Auto-expired (>{PENDING_FRESHNESS_HOURS}h pending)",
+            })
+            .in_("execution_status", ["PENDING_CONFIRM", "PENDING_AUTO_EXIT", "SIGNAL_ONLY"])
+            .lt("bar_time", cutoff_iso)
+            .execute()
+        )
+        n = len(res.data) if res.data else 0
+        if n > 0:
+            logger.info(f"[DB] ⏰ Expired {n} stale pending signal(s) older than {cutoff_iso}")
+        return n
+    except Exception as e:
+        logger.warning(f"[DB] expire_stale_pending_signals failed: {e}")
+        return 0
+
+
 def get_latest_pending_buy_signal() -> dict | None:
     if DRY_RUN:
         return None

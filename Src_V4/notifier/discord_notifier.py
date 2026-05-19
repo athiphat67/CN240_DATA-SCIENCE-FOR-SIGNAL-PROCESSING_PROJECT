@@ -3,7 +3,14 @@
 import httpx
 import logging
 from typing import Optional
-from config.settings import DISCORD_WEBHOOK_URL, DISCORD_MENTION_ID, DRY_RUN
+from config.settings import (
+    DISCORD_WEBHOOK_URL,
+    DISCORD_MENTION_ID,
+    DRY_RUN,
+    TP_ATR_MULTIPLIER,
+    TP_SL_ATR_MULT,
+    convert_atr_usd_to_thb,
+)
 
 logger = logging.getLogger("trading")
 
@@ -27,11 +34,13 @@ def send_discord(content: str) -> None:
 
 def notify_buy_signal(gate_result: dict, rationale_payload: Optional[dict] = None) -> None:
     mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
-    atr     = gate_result.get("atr_48", 0) or 0
+    atr_usd = gate_result.get("atr_48", 0) or 0          # USD/oz from F_ATR_48
+    usd_thb = gate_result.get("usd_close", 0) or 0       # USD/THB rate
+    atr_thb = convert_atr_usd_to_thb(atr_usd, usd_thb)   # THB/baht-gold
     ask     = gate_result.get("hsh_ask", 0) or 0
     bid     = gate_result.get("hsh_bid", 0) or 0
-    tp_ref = ask + atr * 1.5
-    sl_ref = ask - atr * 1.0
+    tp_ref  = ask + atr_thb * TP_ATR_MULTIPLIER
+    sl_ref  = ask - atr_thb * TP_SL_ATR_MULT
     msg = (
         f"{mention}\n🟢 **BUY SIGNAL** — `{gate_result['bar_time']}`\n```\n"
         f"Session     : {gate_result['session']}\n"
@@ -39,9 +48,9 @@ def notify_buy_signal(gate_result: dict, rationale_payload: Optional[dict] = Non
         f"HSH Ask     : {ask:,.2f} THB  ← ราคาซื้อ\n"
         f"HSH Bid     : {bid:,.2f} THB\n"
         f"XAU/USD     : {gate_result.get('xau_close', 0):.2f}\n"
-        f"ATR(48)     : {atr:.2f} THB  ← ใช้ตั้ง TP/SL\n"
-        f"TP แนะนำ    : {tp_ref:,.2f} (1.5× ATR)\n"
-        f"SL แนะนำ    : {sl_ref:,.2f} (1.0× ATR)\n```\n"
+        f"ATR(48)     : {atr_usd:.2f} USD/oz → {atr_thb:.2f} THB\n"
+        f"TP แนะนำ    : {tp_ref:,.2f} ({TP_ATR_MULTIPLIER}× ATR)\n"
+        f"SL แนะนำ    : {sl_ref:,.2f} ({TP_SL_ATR_MULT}× ATR)\n```\n"
         f"⚠️ **Status: WAITING CONFIRM** — Execute ที่ HSH แล้วกด Confirm BUY ใน UI\n"
     )
     if rationale_payload and rationale_payload.get("rationale_text"):
