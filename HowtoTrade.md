@@ -7,7 +7,7 @@
 - `Src_V4/main.py` เพื่อดูสัญญาณซื้อขาย
 - `Src_V4/tools/confirm_trade_ui.py` เพื่ออัปข้อมูลการเทรดลง DB
 
-ในการรันต้องใช้ `Src_V4` จาก `Watcher_Panitan`
+ในการรันต้องใช้ `Src_V4` pull มาจาก `main` 
 
 Flow การทำงาน:
 
@@ -15,7 +15,7 @@ Flow การทำงาน:
 
 ## ขั้นตอนเตรียมระบบ
 
-1. Pull `Watcher_Panitan` เข้า branch ของตัวเอง จากนั้น `cd` เข้าโปรเจกต์
+1. Pull `main` เข้า branch ของตัวเอง จากนั้น `cd` เข้าโปรเจกต์
 
 2. สร้างไฟล์ `.env` ใน `Src_V4` แล้วใส่ข้อมูลนี้
 
@@ -37,7 +37,7 @@ TRADE_LOG_API_URL=https://goldtrade-logs-api.poonnatuch.workers.dev
 TRADE_LOG_API_KEY=d18c803f59daa3bc03faa3f63b9d5c411177a86d44b2066ec4443fbaac83b551
 ```
 
-หมายเหตุ: สำหรับ `DISCORD_MENTION_ID` สามารถหาได้จากลิงก์ยูทูปที่การฟิวส์ส่งมา
+หมายเหตุ: สำหรับ `DISCORD_MENTION_ID` สามารถหาได้จากลิงก์ยูทูปที่กาฟิวส์ส่งมา
 
 3. แก้ไขไฟล์ `requirements.txt` ในโปรเจกต์ โดยใส่ข้อมูลนี้แทนอันเดิม
 
