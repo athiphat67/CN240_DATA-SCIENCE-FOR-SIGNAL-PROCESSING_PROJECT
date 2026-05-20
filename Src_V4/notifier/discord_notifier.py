@@ -57,6 +57,31 @@ def notify_buy_signal(gate_result: dict, rationale_payload: Optional[dict] = Non
         msg += f"📊 **Rationale:** {rationale_payload['rationale_text']}"
     send_discord(msg)
 
+def notify_buy_reminder(gate_result: dict, reminder_num: int) -> None:
+    """BUY reminder ส่งซ้ำเมื่อยังไม่ได้ confirm — ราคาจาก bar เดิม"""
+    mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
+    atr_usd = gate_result.get("atr_48", 0) or 0
+    usd_thb = gate_result.get("usd_close", 0) or 0
+    atr_thb = convert_atr_usd_to_thb(atr_usd, usd_thb)
+    ask     = gate_result.get("hsh_ask", 0) or 0
+    bid     = gate_result.get("hsh_bid", 0) or 0
+    tp_ref  = ask + atr_thb * TP_ATR_MULTIPLIER
+    sl_ref  = ask - atr_thb * TP_SL_ATR_MULT
+    msg = (
+        f"{mention}\n🔔 **BUY REMINDER #{reminder_num}/2** — `{gate_result['bar_time']}`\n```\n"
+        f"Session     : {gate_result['session']}\n"
+        f"Score       : {gate_result['ranker_score']:.4f}\n"
+        f"HSH Ask     : {ask:,.2f} THB  ← ราคาซื้อ (bar เดิม)\n"
+        f"HSH Bid     : {bid:,.2f} THB\n"
+        f"XAU/USD     : {gate_result.get('xau_close', 0):.2f}\n"
+        f"ATR(48)     : {atr_usd:.2f} USD/oz → {atr_thb:.2f} THB\n"
+        f"TP แนะนำ    : {tp_ref:,.2f} ({TP_ATR_MULTIPLIER}× ATR)\n"
+        f"SL แนะนำ    : {sl_ref:,.2f} ({TP_SL_ATR_MULT}× ATR)\n```\n"
+        f"⚠️ **ยังไม่ได้ Confirm** — กด Confirm BUY ใน UI ก่อนราคาเปลี่ยน | Reminder {reminder_num}/2\n"
+    )
+    send_discord(msg)
+
+
 def notify_sell_signal(gate_result: dict, rationale_payload: Optional[dict] = None) -> None:
     mention = f"<@{DISCORD_MENTION_ID}> " if DISCORD_MENTION_ID else ""
     bid     = gate_result.get("hsh_bid", 0) or 0

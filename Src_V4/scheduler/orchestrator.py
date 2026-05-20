@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -38,6 +39,7 @@ from db.supabase_writer import (
 )
 from notifier.discord_notifier import (
     notify_buy_signal,
+    notify_buy_reminder,
     notify_sell_pending,
     notify_heartbeat,
     notify_error,
@@ -60,6 +62,52 @@ trading_log = logging.getLogger("trading")
 _last_bar_time: str = "N/A"
 _last_score: float = 0.0
 _last_state: str = STATE_EMPTY
+
+# BUY reminder: cancel event for the currently-running reminder thread
+_buy_reminder_cancel: threading.Event | None = None
+
+def _run_buy_reminders(gate_result: dict, cancel: threading.Event) -> None:
+    """Background thread: ส่ง BUY reminder ที่ T+30s และ T+40s ถ้ายังไม่ได้ confirm"""
+    # T+30s — Reminder #1
+    if cancel.wait(30):
+        return
+    try:
+        if get_current_state() != STATE_HOLDING:
+            notify_buy_reminder(gate_result, reminder_num=1)
+            trading_log.info("[BUY Reminder] #1 sent — still WAITING_CONFIRM at T+30s")
+        else:
+            trading_log.info("[BUY Reminder] #1 skipped — already HOLDING at T+30s")
+    except Exception as e:
+        trading_log.warning(f"[BUY Reminder] #1 error: {e}")
+
+    # T+40s — Reminder #2
+    if cancel.wait(10):
+        return
+    try:
+        if get_current_state() != STATE_HOLDING:
+            notify_buy_reminder(gate_result, reminder_num=2)
+            trading_log.info("[BUY Reminder] #2 sent — still WAITING_CONFIRM at T+40s")
+        else:
+            trading_log.info("[BUY Reminder] #2 skipped — already HOLDING at T+40s")
+    except Exception as e:
+        trading_log.warning(f"[BUY Reminder] #2 error: {e}")
+
+
+def schedule_buy_reminders(gate_result: dict) -> None:
+    """ยิง background thread สำหรับ BUY reminder — cancel thread เก่าก่อนถ้ามีอยู่"""
+    global _buy_reminder_cancel
+    if _buy_reminder_cancel is not None:
+        _buy_reminder_cancel.set()
+    cancel = threading.Event()
+    _buy_reminder_cancel = cancel
+    t = threading.Thread(
+        target=_run_buy_reminders,
+        args=(gate_result, cancel),
+        daemon=True,
+        name="buy-reminder",
+    )
+    t.start()
+
 
 tp_manager = DynamicTPManager(
     atr_multiplier=TP_ATR_MULTIPLIER,
@@ -656,6 +704,7 @@ def run_signal_pipeline() -> None:
                 trading_log.info(
                     f"BUY signal sent — WAITING_CONFIRM | score={_last_score:.4f} | signal_id={signal_id}"
                 )
+                schedule_buy_reminders(gate_result)
 
             elif signal_type == "SELL":
                 # Manual-confirm mode: do NOT close active trade or flip state here.
