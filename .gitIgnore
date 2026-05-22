@@ -103,3 +103,10 @@ Src_V2/logs/logs/
 node_modules/
 
 CLAUDE.md
+
+# ─────────────────────────────────────────────────────────────────────────
+# Supabase migration / DB backup dumps (contain prod data)
+# ─────────────────────────────────────────────────────────────────────────
+backup_*.sql
+Src_V4/hsh_recent.csv
+Src_V4/ig_recent.csv
