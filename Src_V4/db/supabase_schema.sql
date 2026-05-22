@@ -103,5 +103,83 @@ WHERE signal_type = 'BUY'
   AND passed = true
   AND execution_status IN ('PENDING_CONFIRM', 'SIGNAL_ONLY');
 
+-- ─── Table 5: pipeline monitor ─────────────────────────────────────────────
+-- Mirror of the DDL block at the top of monitoring/pipeline_monitor.py.
+-- Upserted on conflict (bar_time) by pipeline_monitor.save_to_db().
+CREATE TABLE IF NOT EXISTS v3_data_pipeline (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    bar_time         TEXT NOT NULL UNIQUE,
+    run_at           TIMESTAMPTZ DEFAULT NOW(),
+    session          TEXT,
+    pipeline_status  TEXT,
+    total_ms         INT,
+
+    l1_status        TEXT,
+    l1_ms            INT,
+    l1_bars          INT,
+    l1_hsh_ask       NUMERIC,
+    l1_hsh_bid       NUMERIC,
+    l1_xau_close     NUMERIC,
+    l1_usd_close     NUMERIC,
+    l1_error         TEXT,
+
+    l2_status        TEXT,
+    l2_ms            INT,
+    l2_atr_48        NUMERIC,
+    l2_rsi_14        NUMERIC,
+    l2_rsi_6         NUMERIC,
+    l2_bb_pos        NUMERIC,
+    l2_srvr          NUMERIC,
+    l2_regime        INT,
+    l2_spread_norm   NUMERIC,
+    l2_features      JSONB,
+    l2_error         TEXT,
+
+    l3_status        TEXT,
+    l3_ms            INT,
+    l3_score         NUMERIC,
+    l3_model         TEXT,
+    l3_top_shap_feat TEXT,
+    l3_top_shap_val  NUMERIC,
+    l3_error         TEXT,
+
+    l4_status        TEXT,
+    l4_ms            INT,
+    l4_state_before  TEXT,
+    l4_signal_type   TEXT,
+    l4_passed        BOOLEAN,
+    l4_reject_reason TEXT,
+    l4_gates         JSONB,
+    l4_error         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_data_pipeline_run_at ON v3_data_pipeline(run_at DESC);
+
+-- ─── Table 6: HSH965 tick prices ───────────────────────────────────────────
+-- Source of truth for HSH gold tick feed. Inserted by the price ingestor;
+-- read by core/candle_builder.py via _fetch_table_chunked() with timestamp
+-- range filters. INSERT-only — no on_conflict path in the writer.
+CREATE TABLE IF NOT EXISTS gold_prices_hsh (
+    id              BIGSERIAL PRIMARY KEY,
+    timestamp       TIMESTAMPTZ NOT NULL,
+    ask_96          NUMERIC(10,2),
+    bid_96          NUMERIC(10,2),
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_gold_prices_hsh_timestamp
+    ON gold_prices_hsh(timestamp DESC);
+
+-- ─── Table 7: Intergold spot + FX ticks ────────────────────────────────────
+-- spot_price = XAU/USD, usd_thb = USD→THB FX. Same access pattern as
+-- gold_prices_hsh.
+CREATE TABLE IF NOT EXISTS gold_prices_ig (
+    id              BIGSERIAL PRIMARY KEY,
+    timestamp       TIMESTAMPTZ NOT NULL,
+    spot_price      NUMERIC(10,4),
+    usd_thb         NUMERIC(10,4),
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_gold_prices_ig_timestamp
+    ON gold_prices_ig(timestamp DESC);
+
 -- Reload Supabase/PostgREST schema cache.
 NOTIFY pgrst, 'reload schema';
