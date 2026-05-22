@@ -48,11 +48,18 @@ def _to_iso(series: pd.Series) -> pd.Series:
 
 def _upsert_batch(client, table: str, rows: list[dict]) -> int:
     try:
-        client.table(table).upsert(rows, on_conflict="timestamp").execute()
+        client.table(table).insert(rows, count="exact").execute()
         return len(rows)
     except Exception as e:
-        log.error(f"  batch error ({table}): {e}")
-        return 0
+        # Row-level duplicate — retry one-by-one to skip existing rows
+        inserted = 0
+        for row in rows:
+            try:
+                client.table(table).insert(row).execute()
+                inserted += 1
+            except Exception:
+                pass
+        return inserted
 
 
 def seed_hsh(client):
