@@ -307,9 +307,9 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     hist_vol_xau = (
         df["xau_close"].pct_change().rolling(VOL_WINDOW).std() * df["xau_close"]
     )
-    df["F_Historical_Vol_THB"] = hist_vol_xau * _HIST_VOL_WEIGHT * df["usd_close"]
-    df["F_Remaining_Vol"] = df["F_Historical_Vol_THB"] * (1.0 - df["F_FSP"])
-    df["F_SRVR"] = df["F_Remaining_Vol"] / df["F_ATR_48"].replace(0, 1e-9)
+    df["F_Historical_Vol_THB"] = (hist_vol_xau * _HIST_VOL_WEIGHT * df["usd_close"]).ffill().fillna(0)
+    df["F_Remaining_Vol"] = (df["F_Historical_Vol_THB"] * (1.0 - df["F_FSP"])).ffill().fillna(0)
+    df["F_SRVR"] = (df["F_Remaining_Vol"] / df["F_ATR_48"].replace(0, 1e-9)).ffill().fillna(0)
 
     # Momentum (No boundary reset)
     df["F_Mom_1bar"] = df["hsh_close_ask"].pct_change(1).fillna(0)
