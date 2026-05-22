@@ -34,8 +34,14 @@ def _get_client() -> Client:
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _client
 
-def _fetch_table_chunked(table: str, start_dt: str, end_dt: str, chunk_size: int = 5000) -> pd.DataFrame:
-    """ดึงข้อมูลแบบ Pagination เพื่อเลี่ยง Supabase PostgREST Limit (default 1000)"""
+def _fetch_table_chunked(
+    table: str,
+    start_dt: str,
+    end_dt: str,
+    columns: str = "*",
+    chunk_size: int = 1000,
+) -> pd.DataFrame:
+    """ดึงข้อมูลแบบ Pagination เพื่อเลี่ยง Supabase PostgREST Limit"""
     all_rows = []
     offset = 0
     client = _get_client()
@@ -44,19 +50,29 @@ def _fetch_table_chunked(table: str, start_dt: str, end_dt: str, chunk_size: int
         try:
             res = (
                 client.table(table)
-                .select("*")
+                .select(columns)
                 .gte("timestamp", start_dt)
                 .lte("timestamp", end_dt)
                 .order("timestamp", desc=False)
                 .range(offset, offset + chunk_size - 1)
                 .execute()
             )
-            if not res.data:
+
+            rows = res.data or []
+            if not rows:
                 break
-            all_rows.extend(res.data)
-            if len(res.data) < chunk_size:
+
+            all_rows.extend(rows)
+
+            logger.info(
+                f"[DB] fetched {table}: offset={offset}, rows={len(rows)}, total={len(all_rows)}"
+            )
+
+            if len(rows) < chunk_size:
                 break
+
             offset += chunk_size
+
         except Exception as e:
             logger.error(f"DB fetch error on {table} at offset {offset}: {e}")
             break
@@ -160,8 +176,19 @@ def build_candles() -> pd.DataFrame:
     end_dt = now_bkk.strftime("%Y-%m-%dT%H:%M:%S")
 
     # 1. Fetch Raw Data
-    hsh_raw = _fetch_table_chunked("gold_prices_hsh", start_dt, end_dt)
-    ig_raw  = _fetch_table_chunked("gold_prices_ig", start_dt, end_dt)
+    hsh_raw = _fetch_table_chunked(
+        "gold_prices_hsh",
+        start_dt,
+        end_dt,
+        "timestamp,bid_96,ask_96",
+    )
+
+    ig_raw = _fetch_table_chunked(
+        "gold_prices_ig",
+        start_dt,
+        end_dt,
+        "timestamp,spot_price,usd_thb",
+    )
 
     if hsh_raw.empty or ig_raw.empty:
         raise RuntimeError("[P1] ไม่พบข้อมูลดิบ")
