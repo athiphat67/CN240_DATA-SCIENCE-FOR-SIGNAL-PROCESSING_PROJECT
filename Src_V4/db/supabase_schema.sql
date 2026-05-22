@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS v3_bar_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_bar_logs_bar_time ON v3_bar_logs(bar_time DESC);
 
+-- ============================================================
+-- Post-Merge Migration Tail
+-- Safe migration for existing Supabase tables
+-- ============================================================
+
+-- ─── Ensure v3_signals has all post-merge columns ───────────
 ALTER TABLE public.v3_signals
 ADD COLUMN IF NOT EXISTS rationale_text TEXT,
 ADD COLUMN IF NOT EXISTS top_shap_features JSONB,
@@ -85,15 +91,9 @@ ADD COLUMN IF NOT EXISTS execution_status TEXT DEFAULT 'SIGNAL_ONLY',
 ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
 ADD COLUMN IF NOT EXISTS confirmed_price NUMERIC(10,2),
 ADD COLUMN IF NOT EXISTS confirm_note TEXT,
-ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
+ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 
--- Optional but strongly recommended:
--- enforce only one OPEN trade at a time.
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_one_open_trade
-ON public.v3_active_trades (status)
-WHERE status = 'OPEN';
-
--- Helpful indexes for execution flow.
 CREATE INDEX IF NOT EXISTS idx_signals_execution_status
 ON public.v3_signals(execution_status);
 
