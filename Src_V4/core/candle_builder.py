@@ -69,9 +69,12 @@ def _clean_and_localize(df: pd.DataFrame, price_cols: list) -> pd.DataFrame:
         return df
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["timestamp"] = df["timestamp"].dt.tz_localize(
-        TZ, ambiguous="NaT", nonexistent="NaT"
-    )
+    if df["timestamp"].dt.tz is None:
+        df["timestamp"] = df["timestamp"].dt.tz_localize(
+            TZ, ambiguous="NaT", nonexistent="NaT"
+        )
+    else:
+        df["timestamp"] = df["timestamp"].dt.tz_convert(TZ)
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
 
