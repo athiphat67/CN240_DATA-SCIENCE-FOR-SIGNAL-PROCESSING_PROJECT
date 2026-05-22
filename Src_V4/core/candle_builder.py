@@ -16,6 +16,7 @@
 import os
 import pandas as pd
 import numpy as np
+import pytz
 import logging
 from datetime import datetime, timedelta
 from supabase import create_client, Client
@@ -23,6 +24,7 @@ from config.settings import SUPABASE_URL, SUPABASE_KEY, LOOKBACK_BARS, TIMEZONE,
 
 logger = logging.getLogger("system")
 TZ = "Asia/Bangkok"
+_BKK_TZ = pytz.timezone(TZ)
 
 _client: Client | None = None
 
@@ -67,9 +69,12 @@ def _clean_and_localize(df: pd.DataFrame, price_cols: list) -> pd.DataFrame:
         return df
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df["timestamp"] = df["timestamp"].dt.tz_localize(
-        TZ, ambiguous="NaT", nonexistent="NaT"
-    )
+    if df["timestamp"].dt.tz is None:
+        df["timestamp"] = df["timestamp"].dt.tz_localize(
+            TZ, ambiguous="NaT", nonexistent="NaT"
+        )
+    else:
+        df["timestamp"] = df["timestamp"].dt.tz_convert(TZ)
     df.set_index("timestamp", inplace=True)
     df.sort_index(inplace=True)
 
@@ -78,6 +83,61 @@ def _clean_and_localize(df: pd.DataFrame, price_cols: list) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             df.loc[df[col] <= 0.0, col] = np.nan
 
+    return df
+
+
+# Maximum allowed pct change between consecutive ticks for a given price column.
+# Gold can move ~1% in 10 min on news but a single-tick jump > this is almost
+# always a bad feed. Picked conservative on the high side to avoid false trips.
+_OUTLIER_MAX_PCT_JUMP = 0.015  # 1.5%
+
+
+def _filter_outlier_ticks(
+    df: pd.DataFrame, price_col: str, max_pct_jump: float = _OUTLIER_MAX_PCT_JUMP
+) -> pd.DataFrame:
+    """Mask ticks whose pct-change from the *last known good* tick exceeds the threshold.
+
+    Protects against bad ticks (typos / glitched feeds) from contaminating the
+    `.last()` aggregation during resample and then propagating via ffill.
+    Outlier ticks are set to NaN so subsequent ffill restores the prior good
+    value rather than the spike.
+
+    Iterative implementation: once a tick is flagged as outlier, the reference
+    used for the next pct-change check stays at the previous good value. This
+    prevents a sustained bad value (e.g. the same spike repeating for N bars)
+    from "anchoring" the reference and slipping back through the filter.
+    """
+    if df.empty or price_col not in df.columns:
+        return df
+
+    values = df[price_col].to_numpy(copy=True)
+    n = len(values)
+    last_good = np.nan
+    outlier_idx: list[int] = []
+
+    for i in range(n):
+        v = values[i]
+        if np.isnan(v) or v <= 0:
+            continue
+        if np.isnan(last_good):
+            last_good = v
+            continue
+        pct = abs(v - last_good) / last_good
+        if pct > max_pct_jump:
+            values[i] = np.nan
+            outlier_idx.append(i)
+        else:
+            last_good = v
+
+    if outlier_idx:
+        sample = {
+            df.index[idx]: float(df[price_col].iloc[idx]) for idx in outlier_idx[:3]
+        }
+        logger.warning(
+            f"[Outlier] {price_col}: masked {len(outlier_idx)} tick(s) with > "
+            f"{max_pct_jump * 100:.1f}% jump from last-good (examples: {sample})"
+        )
+        df[price_col] = values
     return df
 
 
@@ -90,7 +150,10 @@ def build_candles() -> pd.DataFrame:
     - Resample จาก DataFrame เดียวกันเพื่อให้ High/Low/Close ตรงกัน
     """
     logger.info("[P1] Building M10 candles (Exact Sync with app.py)...")
-    now_bkk = datetime.now().astimezone()
+    # Anchor explicitly to Asia/Bangkok so the fetch window is correct on any
+    # host TZ (UTC servers in particular). datetime.now().astimezone() would
+    # use the system TZ and silently shift the window by hours.
+    now_bkk = datetime.now(_BKK_TZ)
 
     LOOKBACK_DAYS = 35
     start_dt = (now_bkk - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -106,6 +169,16 @@ def build_candles() -> pd.DataFrame:
     # 2. Clean & Localize
     hsh_df = _clean_and_localize(hsh_raw, ["bid_96", "ask_96"])
     ig_df  = _clean_and_localize(ig_raw, ["spot_price", "usd_thb"])
+
+    # 2b. Mask outlier ticks (>1.5% intra-tick jump) BEFORE the join+ffill.
+    # Without this, a single bad tick (e.g. 72,210 instead of 70,210) gets
+    # picked up by resample.last() and then ffill carries it forward for the
+    # entire window where no fresh ticks arrive — distorting downstream
+    # rolling features and P&L calculations until a real tick lands again.
+    hsh_df = _filter_outlier_ticks(hsh_df, "bid_96")
+    hsh_df = _filter_outlier_ticks(hsh_df, "ask_96")
+    ig_df  = _filter_outlier_ticks(ig_df, "spot_price")
+    ig_df  = _filter_outlier_ticks(ig_df, "usd_thb", max_pct_jump=0.005)  # FX much tighter
 
     # 3. [CRITICAL] Join Raw Ticks & Forward Fill (เลียนแบบ app.py บรรทัด 182-184)
     # วิธีนี้จะทำให้เช้าวันจันทร์มีราคา HSH จากวันศุกร์มาใช้ต่อได้

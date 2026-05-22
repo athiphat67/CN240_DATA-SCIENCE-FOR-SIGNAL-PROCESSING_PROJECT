@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 import uuid
 from datetime import datetime
 
@@ -18,6 +20,7 @@ from config.settings import (
     SIGNAL_THRESHOLD,
     GATE_SPREAD_NORM_MAX,
     FORCE_SELL_BAR_TIMES_BKK,
+    convert_atr_usd_to_thb,
 )
 from core.candle_builder import build_candles
 from core.feature_engine import compute_features
@@ -32,9 +35,11 @@ from db.supabase_writer import (
     get_open_trade,
     get_latest_pending_sell_signal,
     mark_signal_execution,
+    expire_stale_pending_signals,
 )
 from notifier.discord_notifier import (
     notify_buy_signal,
+    notify_buy_reminder,
     notify_sell_pending,
     notify_heartbeat,
     notify_error,
@@ -44,14 +49,65 @@ from notifier.discord_notifier import (
 )
 from notifier.trade_log_api import send_trade_log
 from rationale.generator import build_trade_payload
+import monitoring.pipeline_monitor as pm
 
 TZ = pytz.timezone(TIMEZONE)
+
+
+def _ms(t0: float) -> int:
+    return int((time.monotonic() - t0) * 1000)
 system_log = logging.getLogger("system")
 trading_log = logging.getLogger("trading")
 
 _last_bar_time: str = "N/A"
 _last_score: float = 0.0
 _last_state: str = STATE_EMPTY
+
+# BUY reminder: cancel event for the currently-running reminder thread
+_buy_reminder_cancel: threading.Event | None = None
+
+def _run_buy_reminders(gate_result: dict, cancel: threading.Event) -> None:
+    """Background thread: ส่ง BUY reminder ที่ T+30s และ T+40s ถ้ายังไม่ได้ confirm"""
+    # T+30s — Reminder #1
+    if cancel.wait(30):
+        return
+    try:
+        if get_current_state() != STATE_HOLDING:
+            notify_buy_reminder(gate_result, reminder_num=1)
+            trading_log.info("[BUY Reminder] #1 sent — still WAITING_CONFIRM at T+30s")
+        else:
+            trading_log.info("[BUY Reminder] #1 skipped — already HOLDING at T+30s")
+    except Exception as e:
+        trading_log.warning(f"[BUY Reminder] #1 error: {e}")
+
+    # T+40s — Reminder #2
+    if cancel.wait(10):
+        return
+    try:
+        if get_current_state() != STATE_HOLDING:
+            notify_buy_reminder(gate_result, reminder_num=2)
+            trading_log.info("[BUY Reminder] #2 sent — still WAITING_CONFIRM at T+40s")
+        else:
+            trading_log.info("[BUY Reminder] #2 skipped — already HOLDING at T+40s")
+    except Exception as e:
+        trading_log.warning(f"[BUY Reminder] #2 error: {e}")
+
+
+def schedule_buy_reminders(gate_result: dict) -> None:
+    """ยิง background thread สำหรับ BUY reminder — cancel thread เก่าก่อนถ้ามีอยู่"""
+    global _buy_reminder_cancel
+    if _buy_reminder_cancel is not None:
+        _buy_reminder_cancel.set()
+    cancel = threading.Event()
+    _buy_reminder_cancel = cancel
+    t = threading.Thread(
+        target=_run_buy_reminders,
+        args=(gate_result, cancel),
+        daemon=True,
+        name="buy-reminder",
+    )
+    t.start()
+
 
 tp_manager = DynamicTPManager(
     atr_multiplier=TP_ATR_MULTIPLIER,
@@ -118,11 +174,10 @@ def sync_tp_state_from_db(features_row: dict | None = None) -> None:
 
         atr_thb = 0.0
         if features_row and features_row.get("F_ATR_48"):
-            # Convert USD ATR to THB ATR
-            # F_ATR_48 is in USD/oz. Formula: USD_ATR * (15.244 / 31.1035) * USD_THB_Rate
-            atr_48 = float(features_row["F_ATR_48"])
-            usd_close = float(features_row.get("usd_close", 32.4))
-            atr_thb = atr_48 * (15.244 / 31.1035) * usd_close
+            atr_thb = convert_atr_usd_to_thb(
+                float(features_row["F_ATR_48"]),
+                float(features_row.get("usd_close", 32.4)),
+            )
 
         sl_price = None
         if atr_thb > 0:
@@ -172,19 +227,66 @@ def run_signal_pipeline() -> None:
     now = datetime.now(TZ)
     system_log.info(f"[Job A] Pipeline started at {now.strftime('%H:%M:%S')}")
 
+    # House-keeping: roll off pending signals older than PENDING_FRESHNESS_HOURS
+    # so the DB never accumulates ghost PENDING_CONFIRM rows that are no longer
+    # surfaced by get_latest_pending_*().
     try:
-        candles_df = build_candles()
-        features_row = compute_features(candles_df)
+        expire_stale_pending_signals()
+    except Exception as _e:
+        system_log.warning(f"[Job A] expire_stale_pending_signals skipped: {_e}")
+
+    _mon = pm.new_run()
+
+    try:
+        # ── L1: Candle Builder ────────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            candles_df = build_candles()
+            pm.record_l1(_mon, candles_df, _ms(_t))
+        except Exception as _e1:
+            pm.record_l1_error(_mon, _ms(_t), str(_e1))
+            raise
+
+        # ── L2: Feature Engine ────────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            features_row = compute_features(candles_df)
+            pm.record_l2(_mon, features_row, _ms(_t))
+        except Exception as _e2:
+            pm.record_l2_error(_mon, _ms(_t), str(_e2))
+            raise
 
         if features_row["session"] == "Closed":
             system_log.info("[Job A] Market closed — skipping")
+            pm.finalize(_mon)
+            pm.print_terminal(_mon)
+            try:
+                pm.save_to_db(_mon)
+            except Exception:
+                pass
             return
 
-        inference_result = run_inference(features_row)
+        # ── L3: Model Inference ───────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            inference_result = run_inference(features_row)
+            pm.record_l3(_mon, inference_result, _ms(_t))
+        except Exception as _e3:
+            pm.record_l3_error(_mon, _ms(_t), str(_e3))
+            raise
+
         _last_bar_time = features_row["bar_time"]
         _last_score = inference_result["ranker_score"]
 
-        gate_result = evaluate_signal_gate(inference_result, features_row)
+        # ── L4: Signal Gate ───────────────────────────────────────────────────
+        _t = time.monotonic()
+        try:
+            gate_result = evaluate_signal_gate(inference_result, features_row)
+            pm.record_l4(_mon, gate_result, _ms(_t))
+        except Exception as _e4:
+            pm.record_l4_error(_mon, _ms(_t), str(_e4))
+            raise
+
         _last_state = gate_result["state_before"]
 
         # ─── TP Manager: sync manual-confirm DB state and evaluate only while HOLDING ───
@@ -245,10 +347,10 @@ def run_signal_pipeline() -> None:
         # past the SL/Trail threshold. If bid recovers, the trigger drops back
         # to TP_UPDATED/NONE and the user sees HOLD again.
         if current_state == STATE_HOLDING and tp_manager.is_active:
-            # Convert USD ATR to THB ATR before passing to TP manager
-            atr_48 = float(features_row.get("F_ATR_48", 0.0))
-            usd_close = float(features_row.get("usd_close", 32.4))
-            atr_thb = atr_48 * (15.244 / 31.1035) * usd_close if atr_48 > 0 else 0.0
+            atr_thb = convert_atr_usd_to_thb(
+                float(features_row.get("F_ATR_48", 0.0)),
+                float(features_row.get("usd_close", 32.4)),
+            )
 
             tp_trigger, tp_price, trail_level = tp_manager.update(
                 current_bid=features_row["hsh_close_bid"],
@@ -602,6 +704,7 @@ def run_signal_pipeline() -> None:
                 trading_log.info(
                     f"BUY signal sent — WAITING_CONFIRM | score={_last_score:.4f} | signal_id={signal_id}"
                 )
+                schedule_buy_reminders(gate_result)
 
             elif signal_type == "SELL":
                 # Manual-confirm mode: do NOT close active trade or flip state here.
@@ -657,6 +760,13 @@ def run_signal_pipeline() -> None:
     except Exception as e:
         system_log.error(f"[Job A] Pipeline error: {e}", exc_info=True)
         notify_error("Job A — signal_pipeline", str(e))
+    finally:
+        pm.finalize(_mon)
+        pm.print_terminal(_mon)
+        try:
+            pm.save_to_db(_mon)
+        except Exception as _db_err:
+            system_log.warning(f"[Monitor] DB save skipped: {_db_err}")
 
 
 def run_heartbeat() -> None:
