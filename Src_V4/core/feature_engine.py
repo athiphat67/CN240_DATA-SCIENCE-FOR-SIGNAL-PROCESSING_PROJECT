@@ -221,8 +221,17 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     """
     df = candles_df.copy()
 
-    if len(df) < OLS_WINDOW + 10:
-        raise ValueError(f"[P2] ข้อมูลไม่พอสำหรับ OLS Cold Start")
+    _MIN_BARS = 20
+    if len(df) < _MIN_BARS:
+        raise ValueError(f"[P2] ข้อมูลไม่พอสำหรับ OLS Cold Start (need ≥{_MIN_BARS}, got {len(df)})")
+
+    # Use a smaller OLS window during cold start (new DB / fresh migration).
+    # Full OLS_WINDOW resumes automatically once enough bars accumulate.
+    _actual_ols = min(OLS_WINDOW, max(_MIN_BARS, len(df) - 10))
+    if _actual_ols < OLS_WINDOW:
+        logger.warning(
+            f"[P2] Cold start: OLS_WINDOW={_actual_ols} (target={OLS_WINDOW}, bars={len(df)})"
+        )
 
     # 1. Session IDs
     df["session"] = _assign_session(df.index)
@@ -231,7 +240,7 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     # 2. Synthetic & Premium (CONV_FACTOR จาก settings.py)
     x_arr = (df["xau_close"] * CONV_FACTOR * df["usd_close"]).values
     y_arr = df["hsh_close_ask"].values
-    slopes, intercepts = _rolling_ols_numpy(x_arr, y_arr, OLS_WINDOW)
+    slopes, intercepts = _rolling_ols_numpy(x_arr, y_arr, _actual_ols)
     df["F_Syn_Price"] = slopes * x_arr + intercepts
     df["F_Thai_Premium"] = df["hsh_close_ask"] - df["F_Syn_Price"]
     df["F_Syn_Price"] = df["F_Syn_Price"].ffill().fillna(0)
@@ -298,9 +307,9 @@ def compute_features(candles_df: pd.DataFrame) -> FeaturesRow:
     hist_vol_xau = (
         df["xau_close"].pct_change().rolling(VOL_WINDOW).std() * df["xau_close"]
     )
-    df["F_Historical_Vol_THB"] = hist_vol_xau * _HIST_VOL_WEIGHT * df["usd_close"]
-    df["F_Remaining_Vol"] = df["F_Historical_Vol_THB"] * (1.0 - df["F_FSP"])
-    df["F_SRVR"] = df["F_Remaining_Vol"] / df["F_ATR_48"].replace(0, 1e-9)
+    df["F_Historical_Vol_THB"] = (hist_vol_xau * _HIST_VOL_WEIGHT * df["usd_close"]).ffill().fillna(0)
+    df["F_Remaining_Vol"] = (df["F_Historical_Vol_THB"] * (1.0 - df["F_FSP"])).ffill().fillna(0)
+    df["F_SRVR"] = (df["F_Remaining_Vol"] / df["F_ATR_48"].replace(0, 1e-9)).ffill().fillna(0)
 
     # Momentum (No boundary reset)
     df["F_Mom_1bar"] = df["hsh_close_ask"].pct_change(1).fillna(0)

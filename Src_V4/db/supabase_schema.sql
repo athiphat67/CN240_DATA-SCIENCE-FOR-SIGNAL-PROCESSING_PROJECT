@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS v3_bar_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_bar_logs_bar_time ON v3_bar_logs(bar_time DESC);
 
+-- ============================================================
+-- Post-Merge Migration Tail
+-- Safe migration for existing Supabase tables
+-- ============================================================
+
+-- ─── Ensure v3_signals has all post-merge columns ───────────
 ALTER TABLE public.v3_signals
 ADD COLUMN IF NOT EXISTS rationale_text TEXT,
 ADD COLUMN IF NOT EXISTS top_shap_features JSONB,
@@ -85,15 +91,9 @@ ADD COLUMN IF NOT EXISTS execution_status TEXT DEFAULT 'SIGNAL_ONLY',
 ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
 ADD COLUMN IF NOT EXISTS confirmed_price NUMERIC(10,2),
 ADD COLUMN IF NOT EXISTS confirm_note TEXT,
-ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW(),
+ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 
--- Optional but strongly recommended:
--- enforce only one OPEN trade at a time.
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_one_open_trade
-ON public.v3_active_trades (status)
-WHERE status = 'OPEN';
-
--- Helpful indexes for execution flow.
 CREATE INDEX IF NOT EXISTS idx_signals_execution_status
 ON public.v3_signals(execution_status);
 
@@ -163,6 +163,9 @@ CREATE TABLE IF NOT EXISTS gold_prices_hsh (
     timestamp       TIMESTAMPTZ NOT NULL,
     ask_96          NUMERIC(10,2),
     bid_96          NUMERIC(10,2),
+    bid_99          NUMERIC(10,2),
+    ask_99          NUMERIC(10,2),
+    market_status   TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_gold_prices_hsh_timestamp
@@ -174,12 +177,28 @@ CREATE INDEX IF NOT EXISTS idx_gold_prices_hsh_timestamp
 CREATE TABLE IF NOT EXISTS gold_prices_ig (
     id              BIGSERIAL PRIMARY KEY,
     timestamp       TIMESTAMPTZ NOT NULL,
+    bid_96          NUMERIC(10,2),
+    ask_96          NUMERIC(10,2),
+    bid_99          NUMERIC(10,2),
+    ask_99          NUMERIC(10,2),
     spot_price      NUMERIC(10,4),
     usd_thb         NUMERIC(10,4),
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_gold_prices_ig_timestamp
     ON gold_prices_ig(timestamp DESC);
+
+-- ─── Migration: add missing columns if DB already exists ───────────────────
+ALTER TABLE public.gold_prices_hsh
+    ADD COLUMN IF NOT EXISTS bid_99        NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS ask_99        NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS market_status TEXT;
+
+ALTER TABLE public.gold_prices_ig
+    ADD COLUMN IF NOT EXISTS bid_96 NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS ask_96 NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS bid_99 NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS ask_99 NUMERIC(10,2);
 
 -- Reload Supabase/PostgREST schema cache.
 NOTIFY pgrst, 'reload schema';
