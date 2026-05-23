@@ -1,62 +1,111 @@
-# นักขุดทอง
-# Gold Trading AI Agent
+# นักขุดทอง — Gold Trading AI Agent
 
 > **Course:** CN240 Data Science for Signal Processing
-
 > **Institution:** Department of Computer Engineering, Thammasat University
-
 > **Lecturer:** Professor Dr. Charturong Tantibundhit
 
-[![Phase](https://img.shields.io/badge/Phase-2%20In%20Progress-yellow)]()
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)]()
-[![Platform](https://img.shields.io/badge/Platform-Google%20Colab-orange)]()
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)]()
 [![License](https://img.shields.io/badge/License-Academic%20Use%20Only-lightgrey)]()
 
 ---
-# Overview
-ระบบ AI วิเคราะห์และตัดสินใจเทรดทองคำ ผสานการอ่านข้อมูลตัวเลข (Technical Indicators) กับการวิเคราะห์ข่าวสาร (News Sentiment) ด้วย LLM
 
-> **CN240 Data Science for Signal Processing** — Dept. of Computer Engineering, Thammasat University
+## Overview
+
+ระบบ Signal Generator สำหรับเทรดทองคำ HSH965 รวม 2 แนวทาง:
+
+| | Src_V4 (หลัก) | Src/ (สำรอง) |
+|---|---|---|
+| **แนวทาง** | XGBoost LambdaMART (ML) | ReAct LLM Agent + News Sentiment |
+| **Model** | LambdaMART v11 · 420 trees · M10 timeframe | Gemini / Groq + FinBERT |
+| **Output** | BUY / SELL signal ทุก 10 นาที | BUY / SELL / HOLD พร้อม rationale |
+| **DB** | Supabase (PostgreSQL) | PostgreSQL |
+| **Notify** | Discord Webhook | Discord + Telegram |
 
 ---
 
----
-
-## 🏗️ โครงสร้างโปรเจกต์
+## โครงสร้างโปรเจกต์
 
 ```
-Src/
-│
-├── agent_core/                          ← AI Agent Core 
-├── core/                                ← Business Logic Layer 
-├── ui/                                  ← UI Layer 
-├── data_engine/                         ← Market Data Collection 
-├── backtest/                            ← Backtest Module
-├── backtest_main_pipeline.py            Backtest class (MainPipelineBacktest)
-├── run_main_backtest.py                 Entry point + CLI args สำหรับ backtest
-├── logs/
-├── database.py                          RunDatabase (PostgreSQL ORM)
-├── main.py                              CLI entry point (production)
-├── logger_setup.py                      THTimeFormatter + log_method decorator
+Src_V4/                        ← ระบบหลัก (XGBoost ML Signal Generator)
+├── core/
+│   ├── candle_builder.py      ← สร้าง M10 candle จาก tick data
+│   ├── feature_engine.py      ← คำนวณ 40+ features (RSI, EMA, OLS slope ฯลฯ)
+│   ├── model_inference.py     ← LambdaMART inference
+│   ├── signal_gate.py         ← กรอง signal + state guard
+│   ├── state_manager.py       ← จัดการสถานะ EMPTY / HOLDING
+│   └── dynamic_tp_manager.py  ← ติดตาม TP แบบ dynamic
+├── db/
+│   ├── supabase_schema.sql    ← DDL ทั้งหมด
+│   └── supabase_writer.py     ← เขียน signal / state / features ลง DB
+├── scheduler/orchestrator.py  ← APScheduler — Job A (M10) + Job C (heartbeat)
+├── models/lambdamart_v11.json ← trained model
+├── tests/                     ← test suite (pytest)
+├── main.py                    ← entry point
 └── requirements.txt
+
+Src/                           ← ระบบสำรอง (ReAct LLM Agent)
+├── agent_core/                ← ReAct loop, LLM clients, RiskManager
+├── data_engine/               ← orchestrator, indicators, news fetcher
+├── engine/engine.py           ← WatcherEngine (event-driven trigger)
+├── backtest/                  ← backtest pipeline
+└── main.py                    ← entry point
 ```
 
 ---
 
-## 🧠 ระบบทำงานอย่างไร
+## วิธีรัน
 
-```
-ราคาทอง + ข่าว  →  Math Engine (RSI, MACD)  →  LLM Agent  →  คำสั่งเทรด
+### Src_V4 (ML หลัก)
+
+```bash
+cd Src_V4
+pip install -r requirements.txt
+cp .env.example .env          # ใส่ DATABASE_URL + DISCORD_WEBHOOK_URL
+
+# paper trading (dry run)
+DRY_RUN=true python main.py
+
+# live
+python main.py
 ```
 
-1. **Data Engine** ดึงราคาทอง Spot, อัตราแลกเปลี่ยน, และข่าวสาร
-2. **Math Engine** คำนวณ Technical Indicators ด้วย Python (LLM ห้ามคำนวณเอง)
-3. **LLM Agent** รับข้อมูลทั้งหมด → วิเคราะห์ → ตัดสินใจ (BUY / SELL / HOLD)
-4. **Execution** ตรวจสอบความปลอดภัย เช่น ขนาดไม้ต้องไม่เกิน 10% ของพอร์ต
+### Src/ (LLM สำรอง)
+
+```bash
+cd Src
+pip install -r requirements.txt
+cp .env.example .env          # ใส่ Gemini/Groq API key, PostgreSQL, TwelveData
+
+# one-shot analysis
+python main.py --provider gemini --skip-fetch
+
+# Gradio dashboard
+python ui/dashboard.py
+```
+
+### Tests (Src_V4)
+
+```bash
+cd Src_V4
+pytest
+```
 
 ---
 
-## 👥 ทีมงาน
+## Data Flow (Src_V4)
+
+```
+HSH965 tick (WebSocket)
+    → M10 Candle Builder
+    → Feature Engine (40+ features)
+    → LambdaMART v11 inference
+    → Signal Gate (state guard + confidence threshold)
+    → Supabase  +  Discord notification
+```
+
+---
+
+## ทีมงาน
 
 | ชื่อ | Student ID |
 |---|---|
@@ -70,6 +119,3 @@ Src/
 | Phatcharaphon Malaisri | 6710685055 |
 | Sitthipong Kamngam | 6710615284 |
 | Panithan Tuntue | 6710615144 |
-
----
-
