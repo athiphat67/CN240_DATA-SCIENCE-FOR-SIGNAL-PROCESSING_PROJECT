@@ -32,9 +32,6 @@ def build_feature_dataset(json_file_path, csv_file_path):
     day_of_week = dt.dayofweek  # 0=วันจันทร์, 6=วันอาทิตย์
 
     # รอบเวลาตลาดทองคำ (เวลาไทย UTC+7)
-    # Asian Session (โตเกียว): 07:00 - 15:00
-    # London Session (ยุโรป): 15:00 - 23:00
-    # New York Session (อเมริกา): 20:00 - 04:00 (ทับซ้อนกับลอนดอนช่วง 20:00-23:00 ซึ่งราคามักจะสวิงแรงสุด)
     is_asian = 1 if 7 <= hour < 15 else 0
     is_london = 1 if 15 <= hour < 23 else 0
     is_ny = 1 if (20 <= hour <= 23) or (0 <= hour < 4) else 0
@@ -45,7 +42,6 @@ def build_feature_dataset(json_file_path, csv_file_path):
     market = data["market_data"]
     tech = data["technical_indicators"]
 
-    # Categorical Encoding (แปลงข้อความเป็นตัวเลขให้ ML)
     trend_map = {"uptrend": 1, "downtrend": -1, "sideways": 0}
 
     features = {
@@ -88,7 +84,6 @@ def build_feature_dataset(json_file_path, csv_file_path):
         articles = cat_data.get("articles", [])
 
         if articles:
-            # หาค่าเฉลี่ย Sentiment ของแต่ละหมวด (-1.0 ถึง 1.0)
             avg_sent = sum(a.get("sentiment_score", 0.0) for a in articles) / len(
                 articles
             )
@@ -105,7 +100,6 @@ def build_feature_dataset(json_file_path, csv_file_path):
     os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
     file_exists = os.path.isfile(csv_file_path)
 
-    # บันทึกแบบ Append (ต่อท้ายเรื่อยๆ)
     df_new.to_csv(
         csv_file_path, mode="a", header=not file_exists, index=False, encoding="utf-8"
     )
@@ -116,21 +110,50 @@ def build_feature_dataset(json_file_path, csv_file_path):
     )
 
 
-
 # ==========================================
 # SHARED HELPERS (ใช้ร่วมกันทั้ง 2 functions)
 # ==========================================
 
 def _extract_time_features(timestamp_str: str) -> dict:
-    """สกัด Time & Session Features จาก timestamp string"""
+    """สกัดเฉพาะ Time Features สำหรับ XGBoost Model (26 Features Set)"""
     dt = pd.to_datetime(timestamp_str)
     hour = dt.hour
+    minute = dt.minute
+    
+    # ── Cyclical Encoding ──────────────────────────────────────────────────────
+    hour_sin = round(np.sin(2 * np.pi * hour / 24), 6)
+    hour_cos = round(np.cos(2 * np.pi * hour / 24), 6)
+    minute_sin = round(np.sin(2 * np.pi * minute / 60), 6)
+    minute_cos = round(np.cos(2 * np.pi * minute / 60), 6)
+    
+    # ── Session Progress (0.0 - 1.0) ──────────────────────────────────────────
+    total_minutes = hour * 60 + minute
+    session_length = 8 * 60  # ทุก Session = 8 ชม. = 480 นาที
+    
+    if 7 <= hour < 15:
+        minutes_from_start = total_minutes - (7 * 60)
+        session_progress = round(minutes_from_start / session_length, 4)
+    elif 15 <= hour < 23:
+        minutes_from_start = total_minutes - (15 * 60)
+        session_progress = round(minutes_from_start / session_length, 4)
+    elif (20 <= hour <= 23) or (0 <= hour < 4):
+        if total_minutes >= 20 * 60:
+            minutes_from_start = total_minutes - (20 * 60)
+        else:
+            minutes_from_start = (4 * 60) + total_minutes
+        session_progress = round(minutes_from_start / session_length, 4)
+    else:
+        session_progress = 0.0
+        
+    session_progress = max(0.0, min(1.0, session_progress))
+    
     return {
-        "hour":              hour,
-        "day_of_week":       dt.dayofweek,  # 0=จันทร์, 6=อาทิตย์
-        "is_asian_session":  int(7  <= hour < 15),
-        "is_london_session": int(15 <= hour < 23),
-        "is_ny_session":     int((20 <= hour <= 23) or (0 <= hour < 4)),
+        "hour_sin": hour_sin,
+        "hour_cos": hour_cos,
+        "minute_sin": minute_sin,
+        "minute_cos": minute_cos,
+        "session_progress": session_progress,
+        "day_of_week": dt.dayofweek,
     }
 
 
@@ -146,7 +169,6 @@ def _extract_sentiment_features(news_by_category: dict) -> dict:
     feats = {}
     for cat in target_categories:
         cat_data = news_by_category.get(cat, {})
-        # รองรับทั้ง format เก่า (list) และ format ใหม่ (dict with 'articles' key)
         articles = cat_data if isinstance(cat_data, list) else cat_data.get("articles", [])
         if articles:
             avg = sum(a.get("sentiment_score", 0.0) for a in articles) / len(articles)
@@ -162,41 +184,20 @@ def get_xgboost_feature(
 ) -> Union[dict, pd.DataFrame]:
     """
     สกัด Feature Set ที่ครบสมบูรณ์สำหรับ XGBoost Buy/Sell Models
-    (ออกแบบให้ตรงกับ hyperparams ใน finetune_dual_results.json)
+    ออกแบบให้ส่งออกเฉพาะ 26 Features ที่มีประสิทธิภาพสูงสุด
 
     Parameters
     ----------
     data : dict | str
-        - dict  → payload จาก orchestrator.run() โดยตรง (เร็วกว่า ไม่ต้อง I/O)
-        - str   → path ของ latest.json (อ่านไฟล์ให้อัตโนมัติ)
+        - dict  → payload จาก orchestrator.run() โดยตรง
+        - str   → path ของ latest.json
     as_dataframe : bool
-        - False → คืน dict  (ใช้กับ model.predict(pd.DataFrame([feat])))
-        - True  → คืน pd.DataFrame 1 แถว (ใช้กับ pipeline ที่ต้องการ DataFrame)
+        - False → คืน dict
+        - True  → คืน pd.DataFrame 1 แถว
 
     Returns
     -------
-    dict หรือ pd.DataFrame ที่มี features เฉพาะตัวเลข พร้อม predict ได้ทันที
-
-    Feature Groups
-    --------------
-    [1] Time (5)         : hour, day_of_week, session flags x3
-    [2] Price (6)        : spot, usd_thb, thai sell/buy/spread/mid
-    [3] Momentum (3)     : 1-candle, 5-candle %chg, 10-candle range %
-    [4] RSI (2)          : value + signal encoded
-    [5] MACD (4)         : line, signal_line, histogram, crossover encoded
-    [6] Bollinger (5)    : pct_b, bandwidth, signal encoded, upper/lower distance %
-    [7] ATR (2)          : value, volatility_level encoded
-    [8] Trend/EMA (5)    : ema_20, ema_50, ema_200, ema_spread %, trend encoded
-    [9] Sentiment (5)    : avg score per news category
-    ─────────────────────────────────────────────────────────
-    Total: 37 features (ทั้งหมดเป็นตัวเลข ไม่มี string / NaN)
-
-    Notes
-    -----
-    - `sma_200` ใน build_feature_dataset เดิมนั้น key ผิด → indicators.py ใช้ `ema_200`
-      ฟังก์ชันนี้แก้ไขเป็น ema_200 ที่ถูกต้องแล้ว
-    - sell_model มี scale_pos_weight=2.67 (imbalanced มากกว่า buy_model=1.43)
-      ดังนั้น threshold ที่เหมาะสมของ sell อาจต้องปรับสูงกว่า 0.5
+    dict หรือ pd.DataFrame ที่มี 26 features (ทั้งหมดเป็นตัวเลข พร้อม predict ได้ทันที)
     """
     # ── โหลดข้อมูล ─────────────────────────────────────────────────────────────
     if isinstance(data, str):
@@ -208,118 +209,99 @@ def get_xgboost_feature(
     market = data["market_data"]
     tech   = data["technical_indicators"]
 
-    # ─── Encoding Maps ──────────────────────────────────────────────────────────
-    _trend_map = {"uptrend": 1, "sideways": 0, "downtrend": -1}
-
-    # bullish_cross=2 (Action) > bullish_zone=1 (State) เพื่อให้ XGBoost แยกน้ำหนักได้
-    _macd_cross_map = {
-        "bullish_cross": 2,
-        "bullish_zone":  1,
-        "neutral":       0,
-        "bearish_zone": -1,
-        "bearish_cross": -2,
-    }
-    _rsi_signal_map   = {"overbought": 1,  "neutral": 0, "oversold": -1}
-    _bb_signal_map    = {"above_upper": 1, "inside": 0,  "below_lower": -1}
-    _atr_vol_map      = {"high": 2, "normal": 1, "low": 0}
-
-    # ── [1] TIME FEATURES ───────────────────────────────────────────────────────
-    feats = _extract_time_features(data["meta"]["generated_at"])
-
-    # ── [2] PRICE FEATURES ──────────────────────────────────────────────────────
-    spot_data  = market.get("spot_price_usd", {})
-    forex_data = market.get("forex", {})
-    thai_data  = market.get("thai_gold_thb", {})
-
-    sell_thb = float(thai_data.get("sell_price_thb", 0) or 0)
-    buy_thb  = float(thai_data.get("buy_price_thb",  0) or 0)
-    mid_thb  = float(thai_data.get("mid_price_thb",  0) or (sell_thb + buy_thb) / 2 if sell_thb + buy_thb > 0 else 0)
-
-    feats.update({
-        "spot_price":       float(spot_data.get("price_usd_per_oz", 0) or 0),
-        "usd_thb":          float(forex_data.get("usd_thb", 0) or 0),
-        "thai_gold_sell":   sell_thb,
-        "thai_gold_buy":    buy_thb,
-        "thai_gold_spread": round(sell_thb - buy_thb, 2),
-        "thai_gold_mid":    round(mid_thb, 2),
-    })
-
-    # ── [3] PRICE MOMENTUM (จาก price_trend ของ Orchestrator) ──────────────────
+    # ── แยกข้อมูลย่อย ─────────────────────────────────────────────────────────
+    spot_data   = market.get("spot_price_usd", {})
+    # รองรับทั้ง key "ohlc" หรือ "xauusd_ohlc" ถ้ามีใน JSON
+    ohlc_data   = market.get("ohlc", {}) or market.get("xauusd_ohlc", {})
+    forex_data  = market.get("forex", {})
     price_trend = market.get("price_trend", {})
-    r_high = float(price_trend.get("10p_range_high", 0) or 0)
-    r_low  = float(price_trend.get("10p_range_low",  0) or 0)
-    range_pct = round((r_high - r_low) / r_low * 100, 4) if r_low > 0 else 0.0
+    
+    trend_data  = tech.get("trend", {})
+    rsi_data    = tech.get("rsi", {})
+    macd_data   = tech.get("macd", {})
+    atr_data    = tech.get("atr", {})
+    bb_data     = tech.get("bollinger", {})
 
-    feats.update({
-        "price_change_pct":    float(price_trend.get("change_pct",    0) or 0),
-        "price_5p_change_pct": float(price_trend.get("5p_change_pct", 0) or 0),
-        "price_10p_range_pct": range_pct,
-    })
+    # ── [1] OHLC DATA ───────────────────────────────────────────────────────────
+    # ถ้าไม่มี OHLC จริง จะใช้ close จาก spot_price แทนทั้งหมด เพื่อป้องกัน Error
+    close_px = float(ohlc_data.get("close", spot_data.get("price_usd_per_oz", 0) or 0))
+    open_px  = float(ohlc_data.get("open", close_px) or close_px)
+    high_px  = float(ohlc_data.get("high", close_px) or close_px)
+    low_px   = float(ohlc_data.get("low", close_px) or close_px)
 
-    # ── [4] RSI ─────────────────────────────────────────────────────────────────
-    rsi_data = tech.get("rsi", {})
-    feats.update({
-        "rsi":               float(rsi_data.get("value",  50) or 50),
-        "rsi_signal_encoded": _rsi_signal_map.get(rsi_data.get("signal", "neutral"), 0),
-    })
+    # ── [2] RETURNS & DELTAS ────────────────────────────────────────────────────
+    xauusd_ret1 = float(price_trend.get("change_pct", 0) or 0)
+    xauusd_ret3 = float(price_trend.get("3p_change_pct", 0) or 0)
+    usdthb_ret1 = float(forex_data.get("usd_thb_change_pct", 0) or 0)
+    
+    xau_macd_delta1 = float(macd_data.get("delta1", 0) or 0)
+    xau_rsi_delta1  = float(rsi_data.get("delta1", 0) or 0)
 
-    # ── [5] MACD ────────────────────────────────────────────────────────────────
-    macd_data = tech.get("macd", {})
-    feats.update({
-        "macd_line":              float(macd_data.get("macd_line",   0) or 0),
-        "macd_signal_line":       float(macd_data.get("signal_line", 0) or 0),
-        "macd_hist":              float(macd_data.get("histogram",   0) or 0),
-        "macd_crossover_encoded": _macd_cross_map.get(
-            macd_data.get("crossover", macd_data.get("signal", "neutral")), 0
-        ),
-    })
+    # ── [3] DISTANCE FROM EMAs ──────────────────────────────────────────────────
+    ema_21 = float(trend_data.get("ema_21", trend_data.get("ema_20", 0)) or 0) # ถ้าไม่มี 21 ใช้ 20 แทน
+    ema_50 = float(trend_data.get("ema_50", 0) or 0)
 
-    # ── [6] BOLLINGER BANDS ─────────────────────────────────────────────────────
-    bb_data   = tech.get("bollinger", {})
-    spot_px   = feats["spot_price"]
-    bb_upper  = float(bb_data.get("upper",  0) or 0)
-    bb_lower  = float(bb_data.get("lower",  0) or 0)
+    xauusd_dist_ema21 = round((close_px - ema_21) / close_px * 100, 4) if (close_px > 0 and ema_21 > 0) else 0.0
+    xauusd_dist_ema50 = round((close_px - ema_50) / close_px * 100, 4) if (close_px > 0 and ema_50 > 0) else 0.0
+    usdthb_dist_ema21 = float(forex_data.get("usd_thb_dist_ema21", 0) or 0)
 
-    # ระยะห่างจาก Band บน/ล่าง (% ของราคา) → บอกว่าราคาใกล้ขอบแค่ไหน
-    dist_upper = round((bb_upper - spot_px) / spot_px * 100, 4) if spot_px > 0 and bb_upper > 0 else 0.0
-    dist_lower = round((spot_px - bb_lower) / spot_px * 100, 4) if spot_px > 0 and bb_lower > 0 else 0.0
+    # ── [4] INDICATORS ──────────────────────────────────────────────────────────
+    _trend_map = {"uptrend": 1, "sideways": 0, "downtrend": -1}
+    trend_regime    = _trend_map.get(trend_data.get("trend", "sideways"), 0)
+    xauusd_rsi14    = float(rsi_data.get("value", 50) or 50)
+    xauusd_macd_hist = float(macd_data.get("histogram", 0) or 0)
+    xauusd_bb_width = float(bb_data.get("bandwidth", 0) or 0)
+    
+    # ATR Normalized (เป็น % ของราคา) ถ้าไม่มี key ให้คำนวณจาก ATR / Close
+    atr_val = float(atr_data.get("value", 0) or 0)
+    xauusd_atr_norm = float(atr_data.get("normalized", round(atr_val / close_px * 100, 4) if close_px > 0 else 0.0) or 0)
+    
+    atr_rank50 = float(atr_data.get("rank50", 0.5) or 0.5)
 
-    feats.update({
-        "bb_pct_b":            float(bb_data.get("pct_b",     0.5) or 0.5),
-        "bb_bandwidth":        float(bb_data.get("bandwidth", 0)   or 0),
-        "bb_signal_encoded":   _bb_signal_map.get(bb_data.get("signal", "inside"), 0),
-        "bb_dist_upper_pct":   dist_upper,
-        "bb_dist_lower_pct":   dist_lower,
-    })
+    # ── [5] CANDLESTICK PATTERNS ────────────────────────────────────────────────
+    # คำนวณจาก OHLC ถ้ามี (กรณีไม่มี OHLC จะได้ 0.0)
+    range_size = high_px - low_px
+    if range_size > 0:
+        # wick_bias: ตั้งแต่ +1 (Close=High, ซื้อขาด) ถึง -1 (Close=Low, ขายขาด)
+        wick_bias = round((close_px - low_px - (high_px - close_px)) / range_size, 4)
+        # body_strength: ขนาดตัวเทียบกับความกว้าง (1 = Marubozu)
+        body_strength = round(abs(close_px - open_px) / range_size, 4)
+    else:
+        wick_bias = 0.0
+        body_strength = 0.0
 
-    # ── [7] ATR ─────────────────────────────────────────────────────────────────
-    atr_data = tech.get("atr", {})
-    feats.update({
-        "atr":                    float(atr_data.get("value", 0) or 0),
-        "atr_volatility_encoded": _atr_vol_map.get(atr_data.get("volatility_level", "normal"), 1),
-    })
+    # ── [6] TIME FEATURES ───────────────────────────────────────────────────────
+    time_feats = _extract_time_features(data["meta"]["generated_at"])
 
-    # ── [8] TREND / EMA ─────────────────────────────────────────────────────────
-    trend_data = tech.get("trend", {})
-    ema_20  = float(trend_data.get("ema_20",  0) or 0)
-    ema_50  = float(trend_data.get("ema_50",  0) or 0)
-    # หมายเหตุ: key ที่ถูกต้องคือ ema_200 (ไม่ใช่ sma_200 ที่ build_feature_dataset ใช้ผิด)
-    ema_200 = float(trend_data.get("ema_200", 0) or 0)
-
-    # % spread ระหว่าง EMA20 กับ EMA50 → วัดความแรงของ Trend
-    ema_spread_pct = round((ema_20 - ema_50) / ema_50 * 100, 4) if ema_50 > 0 else 0.0
-
-    feats.update({
-        "ema_20":           ema_20,
-        "ema_50":           ema_50,
-        "ema_200":          ema_200,
-        "ema_20_50_spread_pct": ema_spread_pct,
-        "trend_encoded":    _trend_map.get(trend_data.get("trend", "sideways"), 0),
-    })
-
-    # ── [9] SENTIMENT ───────────────────────────────────────────────────────────
-    news_by_cat = data.get("news", {}).get("by_category", {})
-    feats.update(_extract_sentiment_features(news_by_cat))
+    # ── [ASSEMBLE FINAL 26 FEATURES] ───────────────────────────────────────────
+    feats = {
+        "xauusd_open":        open_px,
+        "xauusd_high":        high_px,
+        "xauusd_low":         low_px,
+        "xauusd_close":       close_px,
+        "xauusd_ret1":        xauusd_ret1,
+        "xauusd_ret3":        xauusd_ret3,
+        "usdthb_ret1":        usdthb_ret1,
+        "xau_macd_delta1":    xau_macd_delta1,
+        "xauusd_dist_ema21":  xauusd_dist_ema21,
+        "xauusd_dist_ema50":  xauusd_dist_ema50,
+        "usdthb_dist_ema21":  usdthb_dist_ema21,
+        "trend_regime":       trend_regime,
+        "xauusd_rsi14":       xauusd_rsi14,
+        "xau_rsi_delta1":     xau_rsi_delta1,
+        "xauusd_macd_hist":   xauusd_macd_hist,
+        "xauusd_atr_norm":    xauusd_atr_norm,
+        "xauusd_bb_width":    xauusd_bb_width,
+        "atr_rank50":         atr_rank50,
+        "wick_bias":          wick_bias,
+        "body_strength":      body_strength,
+        "hour_sin":           time_feats["hour_sin"],
+        "hour_cos":           time_feats["hour_cos"],
+        "minute_sin":         time_feats["minute_sin"],
+        "minute_cos":         time_feats["minute_cos"],
+        "session_progress":   time_feats["session_progress"],
+        "day_of_week":        time_feats["day_of_week"],
+    }
 
     # ── Sanity check: แทน NaN/Inf ด้วย 0 ────────────────────────────────────────
     feats = {

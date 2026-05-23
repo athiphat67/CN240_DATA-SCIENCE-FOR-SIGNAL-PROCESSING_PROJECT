@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS portfolio (
     current_value_thb REAL    NOT NULL DEFAULT 0.0,
     unrealized_pnl    REAL    NOT NULL DEFAULT 0.0,
     trades_today      INTEGER NOT NULL DEFAULT 0,
+    trades_this_session INTEGER NOT NULL DEFAULT 0,
     updated_at        TEXT    NOT NULL
 );
 """
@@ -206,6 +207,7 @@ class RunDatabase:
                     ("runs", "bb_pct_b", "REAL"),
                     ("runs", "atr_thb", "REAL"),
                     ("portfolio", "trailing_stop_level_thb", "REAL"),
+                    ("portfolio", "trades_this_session", "INTEGER"),
                 ]
                 for table, col, typ in migrations:
                     # FIX: whitelist ก่อน interpolate เข้า f-string
@@ -216,6 +218,18 @@ class RunDatabase:
                     cursor.execute(
                         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ};"
                     )
+                cursor.execute(
+                    "UPDATE portfolio SET trades_this_session = 0 "
+                    "WHERE trades_this_session IS NULL;"
+                )
+                cursor.execute(
+                    "ALTER TABLE portfolio "
+                    "ALTER COLUMN trades_this_session SET DEFAULT 0;"
+                )
+                cursor.execute(
+                    "ALTER TABLE portfolio "
+                    "ALTER COLUMN trades_this_session SET NOT NULL;"
+                )
             conn.commit()
         sys_logger.info("DB init OK — tables: runs, portfolio, llm_logs, trade_log")
 
@@ -613,8 +627,8 @@ class RunDatabase:
         query = """
             INSERT INTO portfolio (id, cash_balance, gold_grams, cost_basis_thb,
                                    current_value_thb, unrealized_pnl, trades_today, updated_at,
-                                   trailing_stop_level_thb)
-            VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   trailing_stop_level_thb, trades_this_session)
+            VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 cash_balance      = EXCLUDED.cash_balance,
                 gold_grams        = EXCLUDED.gold_grams,
@@ -623,7 +637,8 @@ class RunDatabase:
                 unrealized_pnl    = EXCLUDED.unrealized_pnl,
                 trades_today      = EXCLUDED.trades_today,
                 updated_at        = EXCLUDED.updated_at,
-                trailing_stop_level_thb = EXCLUDED.trailing_stop_level_thb;
+                trailing_stop_level_thb = EXCLUDED.trailing_stop_level_thb,
+                trades_this_session = EXCLUDED.trades_this_session;
         """
         values = (
             data.get("cash_balance", 1500.0),
@@ -631,9 +646,10 @@ class RunDatabase:
             data.get("cost_basis_thb", 0.0),
             data.get("current_value_thb", 0.0),
             data.get("unrealized_pnl", 0.0),
-            data.get("trades_today", 0),
+            int(data.get("trades_today") or 0),
             datetime.utcnow().isoformat(timespec="seconds") + "Z",
             data.get("trailing_stop_level_thb"),
+            int(data.get("trades_this_session") or 0),
         )
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -649,6 +665,7 @@ class RunDatabase:
             "current_value_thb": 0.0,
             "unrealized_pnl": 0.0,
             "trades_today": 0,
+            "trades_this_session": 0,
             "updated_at": "",
             "trailing_stop_level_thb": None,
         }
@@ -658,7 +675,13 @@ class RunDatabase:
                     cursor.execute("SELECT * FROM portfolio WHERE id = 1")
                     row = cursor.fetchone()
             if row:
-                return dict(row)
+                portfolio = dict(default)
+                portfolio.update(dict(row))
+                portfolio["trades_today"] = int(portfolio.get("trades_today") or 0)
+                portfolio["trades_this_session"] = int(
+                    portfolio.get("trades_this_session") or 0
+                )
+                return portfolio
         except Exception as e:
             # FIX: log ให้รู้ว่า DB fail — ไม่ใช่แค่ "ยังไม่มี portfolio"
             sys_logger.warning(f"get_portfolio failed, returning default: {e}")
@@ -739,6 +762,41 @@ class RunDatabase:
             f"@ {trade.get('price_thb')} THB/g{pnl_str}"
         )
         return new_id
+
+    def get_trades_count_since(self, since_iso: str) -> int:
+        """นับจำนวนไม้ (BUY/SELL) ที่เกิดขึ้นตั้งแต่เวลา since_iso เป็นต้นมา"""
+        if not since_iso:
+            return 0
+        query = """
+            SELECT COUNT(*) as count
+            FROM trade_log
+            WHERE executed_at::timestamptz >= %s::timestamptz
+        """
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, (since_iso,))
+                    row = cursor.fetchone()
+                    return int(row["count"] or 0)
+        except Exception as e:
+            sys_logger.error(f"get_trades_count_since FAILED: {e}")
+            return 0
+
+    def update_trades_this_session(self, count: int) -> None:
+        """Persist the current session trade count on the portfolio singleton."""
+        safe_count = max(0, int(count or 0))
+        now_str = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        query = """
+            INSERT INTO portfolio (id, trades_this_session, updated_at)
+            VALUES (1, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                trades_this_session = EXCLUDED.trades_this_session,
+                updated_at = EXCLUDED.updated_at;
+        """
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (safe_count, now_str))
+            conn.commit()
 
     def record_emergency_sell_atomic(
         self,
@@ -830,10 +888,11 @@ class RunDatabase:
                         INSERT INTO portfolio (
                             id, cash_balance, gold_grams, cost_basis_thb,
                             current_value_thb, unrealized_pnl, trades_today,
-                            updated_at, trailing_stop_level_thb
+                            trades_this_session, updated_at, trailing_stop_level_thb
                         )
                         VALUES (1, %s, %s, %s, %s, %s,
                                 COALESCE((SELECT trades_today FROM portfolio WHERE id=1), 0) + 1,
+                                COALESCE((SELECT trades_this_session FROM portfolio WHERE id=1), 0) + 1,
                                 %s, NULL)
                         ON CONFLICT (id) DO UPDATE SET
                             cash_balance             = EXCLUDED.cash_balance,
@@ -841,7 +900,8 @@ class RunDatabase:
                             cost_basis_thb           = EXCLUDED.cost_basis_thb,
                             current_value_thb        = EXCLUDED.current_value_thb,
                             unrealized_pnl           = EXCLUDED.unrealized_pnl,
-                            trades_today             = portfolio.trades_today + 1,
+                            trades_today             = COALESCE(portfolio.trades_today, 0) + 1,
+                            trades_this_session      = COALESCE(portfolio.trades_this_session, 0) + 1,
                             updated_at               = EXCLUDED.updated_at,
                             trailing_stop_level_thb  = NULL;
                         """,

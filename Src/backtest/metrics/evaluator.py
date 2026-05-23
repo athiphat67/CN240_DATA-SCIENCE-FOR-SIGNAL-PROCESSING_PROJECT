@@ -15,6 +15,56 @@ class BacktestEvaluator:
         self.session_manager = session_manager
         self._PERIODS_PER_YEAR = { "1m": 362_880, "5m": 72_576, "15m": 24_192, "30m": 12_096, "1h": 6_048, "4h": 1_512, "1d": 252 }
 
+    def _get_current_price(self, df: pd.DataFrame) -> float:
+        for col in ("close_thai", "price", "close"):
+            if col in df.columns and len(df[col].dropna()) > 0:
+                try:
+                    return float(df[col].dropna().iloc[-1])
+                except Exception:
+                    continue
+        return 0.0
+
+    def _get_eval_timestamp(self, df: pd.DataFrame):
+        if "timestamp" not in df.columns or len(df["timestamp"].dropna()) == 0:
+            return None
+        try:
+            return pd.to_datetime(df["timestamp"].dropna().iloc[-1])
+        except Exception:
+            return None
+
+    def _compute_open_trade_metrics(self, df: pd.DataFrame) -> Dict[str, float]:
+        if not self.portfolio:
+            return {
+                "unrealized_pnl_thb": 0.0,
+                "open_capital_per_year_thb": 0.0,
+            }
+
+        current_price = self._get_current_price(df)
+        unrealized = 0.0
+        if current_price > 0:
+            try:
+                unrealized = float(self.portfolio.unrealized_pnl(current_price))
+            except Exception as exc:
+                logger.warning(f"unrealized_pnl calculation failed: {exc}")
+
+        open_capital_per_year = 0.0
+        open_trade = getattr(self.portfolio, "_open_trade", None)
+        eval_ts = self._get_eval_timestamp(df)
+        if open_trade is not None and eval_ts is not None:
+            try:
+                entry_ts = pd.to_datetime(getattr(open_trade, "entry_time", None))
+                holding_days = max((eval_ts - entry_ts).days + 1, 1)
+                position_thb = float(getattr(open_trade, "position_thb", 0.0))
+                if position_thb > 0:
+                    open_capital_per_year = (position_thb * holding_days) / 365.0
+            except Exception as exc:
+                logger.warning(f"open position capital/year calculation failed: {exc}")
+
+        return {
+            "unrealized_pnl_thb": round(unrealized, 2),
+            "open_capital_per_year_thb": round(open_capital_per_year, 2),
+        }
+
     def _compute_risk_metrics(self, df: pd.DataFrame) -> dict:
         """
         คำนวณ MDD / Sharpe / Sortino จาก equity curve ใน portfolio_total_value
@@ -173,6 +223,13 @@ class BacktestEvaluator:
         # 4. Trade Metrics (Win Rate, PnL)
         if self.portfolio:
             trade_m = calculate_trade_metrics(self.portfolio.closed_trades)
+            open_metrics = self._compute_open_trade_metrics(df)
+            trade_m["unrealized_pnl_thb"] = open_metrics["unrealized_pnl_thb"]
+            trade_m["avg_capital_per_year_thb"] = round(
+                float(trade_m.get("avg_capital_per_year_thb", 0.0))
+                + open_metrics["open_capital_per_year_thb"],
+                2,
+            )
             trade_m = add_calmar(trade_m, risk)  # เพิ่ม calmar_ratio
             metrics["trade"] = trade_m
             # bust_flag สำหรับ deploy_gate
@@ -220,7 +277,17 @@ class BacktestEvaluator:
                 logger.info(f"  {'expectancy_thb':<40} {m.get('expectancy_thb', '-')} THB/trade")
                 logger.info(f"  {'max_consec_losses':<40} {m.get('max_consec_losses', '-')}  ← สาย loss ยาวสุด")
                 logger.info(f"  {'net_pnl_thb':<40} {m.get('net_pnl_thb', '-')} THB")
+                logger.info(f"  {'unrealized_pnl_thb':<40} {m.get('unrealized_pnl_thb', '-')} THB")
                 logger.info(f"  {'total_cost_thb':<40} {m.get('total_cost_thb', '-')} THB  ← spread+commission")
+                logger.info(f"  {'largest_win_thb':<40} {m.get('largest_win_thb', '-')} THB")
+                logger.info(f"  {'largest_loss_thb':<40} {m.get('largest_loss_thb', '-')} THB")
+                logger.info(f"  {'best_annualized_trade_pct':<40} {m.get('best_annualized_trade_pct', '-')}%")
+                logger.info(f"  {'worst_annualized_trade_pct':<40} {m.get('worst_annualized_trade_pct', '-')}%")
+                logger.info(f"  {'median_annualized_pct':<40} {m.get('median_annualized_pct', '-')}%")
+                logger.info(f"  {'top10_annualized_trade_pct':<40} {m.get('top10_annualized_trade_pct', '-')}%")
+                logger.info(f"  {'bottom10_annualized_trade_pct':<40} {m.get('bottom10_annualized_trade_pct', '-')}%")
+                logger.info(f"  {'xirr_pct':<40} {m.get('xirr_pct', '-')}%")
+                logger.info(f"  {'avg_capital_per_year_thb':<40} {m.get('avg_capital_per_year_thb', '-')} THB")
             else:
                 for k, v in m.items():
                     logger.info(f"  {k:<40} {v}")

@@ -1,4 +1,3 @@
-# config.yaml
 data:
   gold_csv: "data/merge_data/merged_gold_15min_TH_TIME.csv"
   gold_5min_merged: "data/merge_data/merged_gold_5min_TH_TIME.csv" 
@@ -7,22 +6,24 @@ data:
   external_csv: "data/premium_hsh/Premium_Calculated_Feb_Apr.csv"
 
 backtest:
-  timeframe: "30m"
-  
-  # --- โหมดที่ 1: กำหนดช่วงเวลาชัดเจน (Train / Test Split) ---
+  timeframe: "15m"
   start_date: "2026-01-01"
-  end_date: "2065-01-03"
-  
-  # --- โหมดที่ 2: ดึงข้อมูลล่าสุดย้อนหลัง ---
-  # ถ้าใช้โหมดนี้ ให้ลบค่า start_date/end_date ทิ้ง หรือใส่ค่าเป็น "" (ว่างเปล่า)
-  days: 
-  
+  end_date: "2026-04-21"
+  days: null # ปล่อยว่างไว้เพราะเราใช้ start_date / end_date แล้ว
   react_max_iter: 1
 
 llm:
   provider: "gemini"
-  model: "" # ปล่อยว่างเพื่อใช้ default
+  model: "" 
 
 paths:
-  cache_dir: "output/BIGtest/backtest_cache_main_version8"
-  output_dir: "output//BIGtest/backtest_results_main"
+  cache_dir: "output/BIGtest/backtest_cache_main_version_sniper_v6"
+  output_dir: "output/BIGtest/backtest_results_main_sniper_v6"
+
+# 🌟 [NEW] เพิ่ม Block นี้เข้าไปเพื่อควบคุม Sniper Filter
+sniper:
+  require_master_label: false  # ❌ ปิดการบังคับใช้เฉลย (ให้ AI คิดเอง!)
+  use_master_label: true       # ✅ ยังคงใช้เป็น 1 ในเงื่อนไข Dip ได้
+  min_dip_conditions: 1        # ✅ ต้องเข้าเงื่อนไขอย่างน้อย 1 ข้อถึงจะเทรด
+  enable_trend_filter: true    # ✅ เปิดการกรองเทรนด์ (ไม่สวนเทรนด์)
+  cluster_dedup_mode: "middle" # ✅ กรองสัญญาณที่ติดกันเป็นพืด

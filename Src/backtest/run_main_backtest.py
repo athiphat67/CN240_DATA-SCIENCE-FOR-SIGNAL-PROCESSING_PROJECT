@@ -1,11 +1,9 @@
 """
 run_main_backtest.py  ← PATCHED: เพิ่ม MDD / Sharpe / Sortino
 ══════════════════════════════════════════════════════════════════════
-การเปลี่ยนแปลงจาก version เดิม (ค้นหา # ★ เพื่อดู diff):
-  [A] run()               → บันทึก portfolio_total_value ต่อ candle
+การเปลี่ยนแปลงจาก version เดิม (ค้นหา # ★ เพื่อดู diff):[A] run()               → บันทึก portfolio_total_value ต่อ candle
   [B] _compute_risk_metrics() → method ใหม่
-  [C] calculate_metrics() → รวม risk metrics
-  [D] export_csv()        → เพิ่ม 3 portfolio columns
+  [C] calculate_metrics() → รวม risk metrics[D] export_csv()        → เพิ่ม 3 portfolio columns
 ══════════════════════════════════════════════════════════════════════
 """
 
@@ -45,6 +43,8 @@ from data.csv_loader import load_gold_csv, merge_external_data
 from metrics.evaluator import BacktestEvaluator
 from engine.directive_builder import DirectiveBuilder
 
+from engine.sniper_filter import SniperFilter, SniperConfig, SniperResult
+
 # ── path setup ─────────────────────────────────────────────────────
 _THIS_DIR = Path(__file__).parent.resolve()
 for candidate in [_THIS_DIR.parent, _THIS_DIR]:
@@ -59,13 +59,10 @@ logger = logging.getLogger(__name__)
 # Constants
 # ══════════════════════════════════════════════════════════════════
 
-# NOTE: GOLD_GRAM_PER_BAHT, SPREAD_THB, COMMISSION_THB, DEFAULT_CASH
-#       imported จาก backtest.engine.portfolio — ห้าม redefine ที่นี่
 DEFAULT_CACHE_DIR = "output/backtest_cache_main"
 DEFAULT_OUTPUT_DIR = "output/backtest_results_main"
 MIN_CONFIDENCE = 0.6
 
-# ★ [B-helper] จำนวน candle ต่อปี (gold ~24/5 ~252 วัน)
 _PERIODS_PER_YEAR: Dict[str, int] = {
     "1m": 362_880,
     "5m": 72_576,
@@ -81,13 +78,9 @@ _PERIODS_PER_YEAR: Dict[str, int] = {
 # Time Estimator
 # ══════════════════════════════════════════════════════════════════
 
-
 class TimeEstimator:
-    """คาดเดาเวลาที่เหลือจาก rolling average ของ candle ที่ผ่านมา"""
-
     def __init__(self, window: int = 10):
         from collections import deque
-
         self.times: deque = deque(maxlen=window)
         self._start: float = 0.0
         self.session_start: float = time.time()
@@ -127,7 +120,6 @@ class TimeEstimator:
 # Cache Layer
 # ══════════════════════════════════════════════════════════════════
 
-
 class CandleCache:
     def __init__(self, cache_dir: str, model: str):
         self.dir = Path(cache_dir)
@@ -153,10 +145,7 @@ class CandleCache:
 
     def set(self, ts: pd.Timestamp, data: dict):
         p = self._path(ts)
-        
-        # 🟢 เพิ่มคำสั่งนี้: ให้เช็คและสร้างโฟลเดอร์ก่อนเขียนไฟล์เสมอ (ถ้าไม่มีจะสร้างให้)
         p.parent.mkdir(parents=True, exist_ok=True) 
-        
         p.write_text(
             json.dumps(data, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
@@ -176,7 +165,6 @@ class CandleCache:
 # Main Backtest Class
 # ══════════════════════════════════════════════════════════════════
 
-
 class MainPipelineBacktest:
     def __init__(
         self,
@@ -188,24 +176,24 @@ class MainPipelineBacktest:
         model: str = "",
         timeframe: str = "1h",
         days: int = 30,
-        start_date: str = None,  # 🌟 [NEW] เพิ่มรับค่า start_date
-        end_date: str = None,    # 🌟 [NEW] เพิ่มรับค่า end_date
+        start_date: str = None,  
+        end_date: str = None,    
         cache_dir: str = DEFAULT_CACHE_DIR,
         output_dir: str = DEFAULT_OUTPUT_DIR,
         react_max_iter: int = 5,
         request_delay: float = 0.3,
+        sniper_config: dict = None, # 🌟 [FIX] รับค่า SniperConfig จากภายนอก
     ):
         self.gold_csv = gold_csv
         self.external_csv = external_csv
         self.timeframe = timeframe
         self.days = days
-        self.start_date = start_date # 🌟 [NEW] เก็บลง self
-        self.end_date = end_date     # 🌟 [NEW] เก็บลง self
+        self.start_date = start_date 
+        self.end_date = end_date     
         self.output_dir = output_dir
         self.react_max_iter = react_max_iter
         self.request_delay = request_delay
 
-        # ── LLM Client ──────────────────────────────────────────────────
         from agent_core.llm.client import LLMClientFactory
 
         kwargs = {"model": model} if model else {}
@@ -217,17 +205,15 @@ class MainPipelineBacktest:
         self.raw_df: Optional[pd.DataFrame] = None
         self.agg_df: Optional[pd.DataFrame] = None
         self.result_df: Optional[pd.DataFrame] = None
-        self.results: List[dict] = []
+        self.results: List[dict] =[]
         self.metrics: dict = {}
 
         self._prompt_builder = None
         self._react = None
         self._risk_mgr = None
 
-        # Session Engine — Phase 2
         self.session_manager = TradingSessionManager()
 
-        # News provider — backward compat: ถ้าส่ง news_csv มา ใช้ CSV mode
         if news_provider is not None:
             self.news_provider = news_provider
         elif news_csv:
@@ -235,12 +221,19 @@ class MainPipelineBacktest:
         else:
             self.news_provider = NullNewsProvider()
 
-        # SimPortfolio v2 — ใหม่
         self.portfolio = SimPortfolio(
             initial_cash=DEFAULT_CASH,
             bust_threshold=BUST_THRESHOLD,
-            win_threshold=WIN_THRESHOLD,  # Bug B fix: WIN_THRESHOLD ไม่ใช่ DEFAULT_CASH
+            win_threshold=WIN_THRESHOLD,  
         )
+        
+        # 🌟 [FIX] โหลด SniperConfig จาก dict ที่ส่งเข้ามา (ถ้าไม่มีใช้ Default)
+        s_cfg = SniperConfig()
+        if sniper_config:
+            for k, v in sniper_config.items():
+                if hasattr(s_cfg, k):
+                    setattr(s_cfg, k, v)
+        self.sniper = SniperFilter(s_cfg)
 
     # ── Load & aggregate data ───────────────────────────────────
 
@@ -250,8 +243,27 @@ class MainPipelineBacktest:
             external_csv=self.external_csv or None,
             timeframe=self.timeframe,
         )
+        
+        master = pd.read_csv("data/master_merged_data.csv", low_memory=False)
+        master["timestamp"] = pd.to_datetime(master["timestamp"])
+        
+        # 🌟 [FIX] จัดการ Timezone ให้เป็น Asia/Bangkok ทั้งหมดอย่างปลอดภัย
+        if df["timestamp"].dt.tz is None:
+            df["timestamp"] = df["timestamp"].dt.tz_localize("Asia/Bangkok")
+        else:
+            df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Bangkok")
 
-        # 1. Rename คอลัมน์ให้รองรับทั้งไฟล์ใหม่ (Merged) และไฟล์เก่า
+        if master["timestamp"].dt.tz is None:
+            master["timestamp"] = master["timestamp"].dt.tz_localize("Asia/Bangkok")
+        else:
+            master["timestamp"] = master["timestamp"].dt.tz_convert("Asia/Bangkok")
+
+        master = master[["timestamp", "target_buy", "target_sell", "buy_score", "sell_score"]]
+        df = pd.merge_asof(df.sort_values("timestamp"),
+                        master.sort_values("timestamp"),
+                        on="timestamp", direction="nearest",
+                        tolerance=pd.Timedelta("15min"))
+        
         if "sell_price" in df.columns:
             df = df.rename(columns={
                 "sell_price": "Mock_HSH_Sell_Close",
@@ -273,27 +285,23 @@ class MainPipelineBacktest:
 
         df = df.loc[:, ~df.columns.duplicated()].copy()
 
-         # =================================================================
-        # 🌟 [NEW] ระบบคัดกรองวันที่ (Train / Test Split & Days Back)
-        # =================================================================
         if self.start_date and self.end_date:
-            # โหมด 1: Train / Test Split (มี start_date และ end_date)
             start_ts = pd.to_datetime(self.start_date)
             end_ts   = pd.to_datetime(self.end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
-            # จัดการ Timezone ให้ตรงกับ DataFrame
-            if df["timestamp"].dt.tz is not None:
+            if start_ts.tzinfo is None:
                 start_ts = start_ts.tz_localize("Asia/Bangkok")
-                end_ts   = end_ts.tz_localize("Asia/Bangkok")
+            if end_ts.tzinfo is None:
+                end_ts = end_ts.tz_localize("Asia/Bangkok")
 
             df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)].reset_index(drop=True)
             logger.info(f"📅 [Data Filter] Train/Test Mode: {self.start_date} ถึง {self.end_date}")
             
         else:
-            # โหมด 2: ดึงข้อมูลย้อนหลังตามจำนวน Days (Fallback)
-            
-            # 🚨 กัน Error กรณีลืมใส่ตัวเลขใน yaml (Fallback to 7 days)
             safe_days = self.days if self.days is not None else 7 
+            # 🌟 [FIX] แจ้งเตือนกรณีใช้ Fallback
+            if self.days is None:
+                logger.warning(f"⚠️ [Data Filter] ไม่พบการตั้งค่า days หรือ start/end date ใช้ค่าเริ่มต้นย้อนหลัง {safe_days} วัน")
             
             cutoff = df["timestamp"].max() - pd.Timedelta(days=safe_days)
             df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
@@ -301,19 +309,22 @@ class MainPipelineBacktest:
 
         if df.empty:
             raise ValueError("❌ ไม่พบข้อมูลในช่วงเวลาที่กำหนด กรุณาตรวจสอบ start_date / end_date ใน config.yaml หรือ CSV")
-        # =================================================================
 
-        # 2. ป้องกันการ Resample ซ้ำซ้อน
         is_merged_file = "merged" in str(self.gold_csv).lower()
         
         if self.timeframe == "5m" or is_merged_file:
             self.raw_df = self.agg_df = df.copy()
             logger.info(f"✓ Data ready: {len(df):,} candles (Merged or 5m - Skipped Resample)")
-            return
 
-        freq_map = {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D"}
-        freq = freq_map.get(self.timeframe, "1h")
-  
+            diag = self.sniper.diagnose(self.agg_df)
+            logger.info(f"🔍 Sniper Diagnose: {diag}")
+            if "target_buy" in self.agg_df.columns:
+                tb_counts = self.agg_df["target_buy"].value_counts(dropna=False)
+                logger.info(f"🔍 target_buy distribution:\n{tb_counts}")
+            else:
+                logger.warning("❌ target_buy column ไม่มีใน agg_df !")
+
+            return   
 
         freq_map = {"15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1D"}
         freq = freq_map.get(self.timeframe, "1h")
@@ -344,6 +355,10 @@ class MainPipelineBacktest:
             "premium_sell": "last",
             "pred_premium_buy": "last",
             "pred_premium_sell": "last",
+            "target_buy": "last",
+            "target_sell": "last",
+            "buy_score": "last",
+            "sell_score": "last",
         }
         valid_rules = {k: v for k, v in agg_rules.items() if k in df.columns}
         df.set_index("timestamp", inplace=True)
@@ -361,7 +376,6 @@ class MainPipelineBacktest:
     # ── Main system components ─────────────────────────────────
 
     def _load_main_components(self):
-        """Init ReactOrchestrator + PromptBuilder + RiskManager"""
         if self._react is not None:
             return
 
@@ -374,10 +388,8 @@ class MainPipelineBacktest:
         from agent_core.core.react import ReactOrchestrator, ReactConfig
         from agent_core.core.risk import RiskManager
 
-        # __file__ = Src/backtest/run_main_backtest.py → .parent.parent = Src/
         _src_root = Path(__file__).parent.parent
 
-        # ── Load skills.json ────────────────────────────────────────
         skill_registry = SkillRegistry()
         skills_path = _src_root / "agent_core/config/roles.json"
         if skills_path.exists():
@@ -388,7 +400,6 @@ class MainPipelineBacktest:
         else:
             logger.warning(f"skills.json not found at {skills_path}")
 
-        # ── Load roles.json ─────────────────────────────────────────
         role_registry = RoleRegistry(skill_registry)
         roles_path = _src_root / "agent_core/config/roles.json"
         if roles_path.exists():
@@ -397,7 +408,6 @@ class MainPipelineBacktest:
         else:
             logger.warning(f"roles.json not found at {roles_path}")
 
-        # ── เลือก role พร้อม fallback ───────────────────────────────
         trading_role = AIRole.ANALYST
         if not role_registry.get(trading_role):
             registered = list(role_registry.roles.keys())
@@ -406,10 +416,7 @@ class MainPipelineBacktest:
             trading_role = registered[0]
             logger.warning(f"⚠ AIRole.ANALYST ไม่พบ → fallback to: {trading_role}")
 
-        # ── สร้าง components ─────────────────────────────────────────
-        self.risk_manager = RiskManager(
-
-        )
+        self.risk_manager = RiskManager()
         self._react = ReactOrchestrator(
             llm_client=self.llm_client,
             prompt_builder=PromptBuilder(role_registry, trading_role),
@@ -427,28 +434,23 @@ class MainPipelineBacktest:
         ts = pd.Timestamp(row["timestamp"])
         session_info = self.session_manager.process_candle(ts)
 
-        # 🌟 ดึงราคามาเพื่อทำ Trailing Stop & Auto Exit
-        price = float(row["Mock_HSH_Sell_Close"]) # ราคาโบรกเกอร์ขาย (ราคาเราใช้ซื้อ)
-        current_bid = float(row.get("Mock_HSH_Buy_Close", row.get("Buy", price))) # ราคาเราใช้ขายคืน
+        price = float(row["Mock_HSH_Sell_Close"]) 
+        current_bid = float(row.get("Mock_HSH_Buy_Close", row.get("Buy", price))) 
         
-        # 🌟 อัปเดตเลื่อน Stop loss ตามกำไร (Lock-in profit)
         atr_val = float(row.get("atr", 110.0))
         trailing_dist = max(110.0, atr_val * 1.0)
         self.portfolio.update_trailing_stop(current_bid, trailing_dist)
 
-        # 🌟 เช็คว่าราคาชน TP หรือ SL ที่ตั้งไว้หรือไม่
         exit_reason = self.portfolio.check_auto_exit(current_bid)
         
         if exit_reason:
-            # 🚨 คืนค่า SIGNAL = "SELL" อย่างถูกต้อง ตรงไปตรงมา
-            # เพื่อให้ _apply_to_portfolio นำไป execute และลง log 
             return {
                 "timestamp": str(ts),
                 "close_thai": price,
-                "llm_signal": f"AUTO_{exit_reason}", # ให้รู้ว่าไม่ได้มาจาก AI แต่มาจากระบบ
+                "llm_signal": f"AUTO_{exit_reason}", 
                 "llm_confidence": 1.0,
                 "llm_rationale": f"System forced execution: Hit {exit_reason} at {current_bid}",
-                "final_signal": "SELL",  # <--- เปลี่ยนเป็น SELL แล้วครับ!
+                "final_signal": "SELL",  
                 "final_confidence": 1.0,
                 "rejection_reason": f"Auto-closed by {exit_reason}",
                 "position_size_thb": 0.0,
@@ -461,7 +463,6 @@ class MainPipelineBacktest:
                 "can_execute": session_info.can_execute,
             }
             
-        # 🌟 [NEW] ถ้าตลาดปิด (Dead Zone) ให้คืนค่า HOLD ทันที ประหยัดค่า API!
         if not session_info.can_execute:
             return {
                 "timestamp": str(ts),
@@ -481,11 +482,45 @@ class MainPipelineBacktest:
                 "session_id": session_info.session_id,
                 "can_execute": False,
             }
+            
+        sniper_result: SniperResult = self.sniper.check(
+            row=row,
+            gold_grams=self.portfolio.gold_grams,
+            session_id=session_info.session_id,
+            date_str=ts.strftime("%Y-%m-%d"),
+        )
 
-        # ถ้าไม่โดน SL/TP ค่อยมาเช็คว่ามี Cache ไว้ไหม
+        _tb = row.get("target_buy", -1)
+        if _tb == 1.0:
+            logger.info(
+                f"  🎯 target_buy=1 | sniper={'PASS' if sniper_result.should_call_llm else 'SKIP'} "
+                f"| reason={sniper_result.reason[:80]}"
+            )
+ 
+        if not sniper_result.should_call_llm:
+            return {
+                "timestamp":          str(ts),
+                "close_thai":         price,
+                "llm_signal":         "HOLD",
+                "llm_confidence":     1.0,
+                "llm_rationale":      f"Sniper filtered: {sniper_result.reason}",
+                "final_signal":       "HOLD",
+                "final_confidence":   1.0,
+                "rejection_reason":   sniper_result.reason,
+                "position_size_thb":  0.0,
+                "stop_loss":          0.0,
+                "take_profit":        0.0,
+                "iterations_used":    0,
+                "news_sentiment":     float(row.get("overall_sentiment", 0.0)),
+                "from_cache":         False,
+                "session_id":         session_info.session_id,
+                "can_execute":        session_info.can_execute,
+                "sniper_pass":        False,   
+                "sniper_reason":      sniper_result.reason,
+            }
+
         cached = self.cache.get(ts)
         if cached:
-            # inject session_info ใหม่ทุกครั้ง (ไม่เชื่อ cached value ที่อาจ stale)
             cached["session_id"] = session_info.session_id
             cached["can_execute"] = session_info.can_execute
             return {**cached, "from_cache": True}
@@ -503,22 +538,42 @@ class MainPipelineBacktest:
             interval=self.timeframe,
         )
 
-        # ── [BACKTEST PATCH] Inject time/date ให้ RiskManager อ่านได้ ─────
         market_state["time"] = ts.strftime("%H:%M")
         market_state["date"] = ts.strftime("%Y-%m-%d")
 
-        # ── [v2.3 PATCH] Directive สำหรับ LLM (Refactored) ──────
+        _atr_suggest = float(row.get("atr", 100.0)) or 100.0
+        _sl_suggest  = round(price - 1.0 * _atr_suggest, 2)
+        _tp_suggest  = round(price + 2.0 * _atr_suggest, 2)
+        market_state["suggested_stop_loss"]   = _sl_suggest
+        market_state["suggested_take_profit"] = _tp_suggest
+
         quota_ctx = self.session_manager.get_session_quota_context(ts)
-        market_state["backtest_directive"] = DirectiveBuilder.build_session_directive(
+        _base_directive = DirectiveBuilder.build_session_directive(
             portfolio=self.portfolio,
             quota_ctx=quota_ctx
         )
-        # ─────────────────────────────────────────────────────────────────────
+        market_state["backtest_directive"] = (
+            _base_directive +
+            f"\nSUGGESTED LEVELS (ATR-based, use these if BUY): "
+            f"stop_loss=฿{_sl_suggest:,.2f} | take_profit=฿{_tp_suggest:,.2f} "
+            f"(ATR={_atr_suggest:.0f}, RR=1:2). "
+            f"You MUST set stop_loss and take_profit in your response."
+        )
 
         try:
             result = self._react.run(market_state)
+            _react_error = None
         except Exception as e:
+            _react_error = e
             logger.error(f"  ✗ React error at {ts}: {e}")
+            self._react_error_count = getattr(self, "_react_error_count", 0) + 1
+            if self._react_error_count >= 3:
+                raise RuntimeError(
+                    f"🚨 React error เกิดขึ้น {self._react_error_count} candle ติดกัน!\n"
+                    f"   Error: {e}\n"
+                    f"   ตรวจสอบ agent_core/core/prompt.py หรือ react.py\n"
+                    f"   Hint: มักเกิดจาก method ที่ถูกเปลี่ยนชื่อหรือลบออก เช่น '_compute_session_gate'"
+                ) from e
             result = {
                 "final_decision": {
                     "signal": "HOLD",
@@ -529,12 +584,15 @@ class MainPipelineBacktest:
                     "stop_loss": 0.0,
                     "take_profit": 0.0,
                 },
-                "react_trace": [],
+                "react_trace":[],
                 "iterations_used": 0,
             }
+        else:
+            self._react_error_count = 0
+            _react_error = None
 
         fd = result.get("final_decision", {})
-        trace = result.get("react_trace", [])
+        trace = result.get("react_trace",[])
         llm_signal = "HOLD"
         llm_confidence = 0.5
         llm_rationale = ""
@@ -543,11 +601,20 @@ class MainPipelineBacktest:
             if isinstance(resp, dict) and "signal" in resp:
                 llm_signal = resp.get("signal", "HOLD")
                 llm_confidence = float(resp.get("confidence", 0.5))
-                # ใช้ 'or ""' เพื่อบังคับว่าถ้าดึงมาแล้วเป็น None หรือค่าว่าง ให้กลายเป็น "" เสมอ
                 llm_rationale = resp.get("rationale") or ""
                 break
 
-        # ── Session check ────────────────────────────────────
+        _atr_now = float(row.get("atr", 100.0)) or 100.0
+        _raw_sl  = fd.get("stop_loss")
+        _raw_tp  = fd.get("take_profit")
+        _sl_val  = float(_raw_sl) if (_raw_sl is not None and float(_raw_sl) > 0) \
+                   else round(price - 1.0 * _atr_now, 2)
+        _tp_val  = float(_raw_tp) if (_raw_tp is not None and float(_raw_tp) > 0) \
+                   else round(price + 2.0 * _atr_now, 2)
+        if _raw_sl is None or float(_raw_sl or 0) <= 0:
+            logger.debug(f"  📐 ATR fallback SL={_sl_val:,.0f} TP={_tp_val:,.0f} "
+                         f"(ATR={_atr_now:.0f}, LLM didn't set TP/SL)")
+
         candle_result = {
             "timestamp": str(ts),
             "close_thai": price,
@@ -558,15 +625,20 @@ class MainPipelineBacktest:
             "final_confidence": fd.get("confidence", llm_confidence),
             "rejection_reason": fd.get("rejection_reason"),
             "position_size_thb": fd.get("position_size_thb", 0.0),
-            "stop_loss": fd.get("stop_loss", 0.0),
-            "take_profit": fd.get("take_profit", 0.0),
+            "stop_loss": _sl_val,
+            "take_profit": _tp_val,
             "iterations_used": result.get("iterations_used", 1),
             "news_sentiment": news.get("overall_sentiment", 0.0) if news else 0.0,
             "from_cache": False,
             "session_id": session_info.session_id,
             "can_execute": session_info.can_execute,
+            "sniper_pass":   True,
+            "sniper_reason": sniper_result.reason,
         }
-        self.cache.set(ts, candle_result)
+        if _react_error is None:
+            self.cache.set(ts, candle_result)
+        else:
+            logger.debug(f"  ⚠ Skip cache for {ts} (error result)")
         return candle_result
 
     def _apply_to_portfolio(self, candle_result: dict, timestamp: str = ""):
@@ -575,13 +647,11 @@ class MainPipelineBacktest:
         pos_size = candle_result["position_size_thb"]
         can_execute = candle_result.get("can_execute", True)
 
-        # นอก session → override เป็น HOLD ไม่ execute
         if not can_execute:
             logger.debug(f"  [OUT] {timestamp} outside session → HOLD (was {signal})")
             return
 
         if signal == "BUY":
-            # Bug C fix: ถ้า LLM ไม่ set position_size → fallback ใช้ 60% ของ cash
             if pos_size <= 0:
                 pos_size = round(self.portfolio.cash_balance * 0.6, 2)
                 logger.debug(
@@ -591,21 +661,24 @@ class MainPipelineBacktest:
             if not ok:
                 logger.debug(f"  BUY skipped: {self.portfolio.cash_balance:.0f} THB")
             else:
-                # [v2.2 PATCH] บันทึก TP/SL price จาก final_decision เข้า portfolio
-                # เพื่อให้ risk.py อ่านราคาจริงแทน absolute THB threshold
                 _tp = float(candle_result.get("take_profit", 0.0) or 0.0)
                 _sl = float(candle_result.get("stop_loss",   0.0) or 0.0)
                 self.portfolio.set_open_tp_sl(_tp, _sl)
                 logger.debug(f"  TP/SL stored: TP={_tp:,.0f} SL={_sl:,.0f}")
-                # บันทึก trade เข้า session compliance
                 self.session_manager.record_trade(
                     pd.Timestamp(timestamp),
                 )
+                ts_obj = pd.Timestamp(timestamp)
+                self.sniper.record_buy(                              
+                    date_str=ts_obj.strftime("%Y-%m-%d"),
+                    session_id=self.session_manager._find_session(ts_obj).id
+                    if self.session_manager._find_session(ts_obj) else None,
+                )
+            
         elif signal == "SELL":
             ok = self.portfolio.execute_sell(price, timestamp=timestamp)
-            if ok:  # 🌟 [FIX] บันทึกเฉพาะตอนที่ขายได้เงินจริงๆ เท่านั้น!
+            if ok:  
                 self.session_manager.record_trade(pd.Timestamp(timestamp))
-        # PortfolioBustException propagates ขึ้น run() อัตโนมัติ
 
     # ── Full run ────────────────────────────────────────────────
 
@@ -642,7 +715,6 @@ class MainPipelineBacktest:
                 self.results.append(result)
                 break
 
-            # ────────────────────────────────────────────────────────────
             port_val = self.portfolio.total_value(result["close_thai"])
 
             result["portfolio_total_value"] = round(float(port_val), 2)
@@ -664,7 +736,6 @@ class MainPipelineBacktest:
             )
             logger.info(eta_str)
 
-        # Session Engine: finalize ปิด session สุดท้าย
         self.session_manager.finalize()
         logger.info(f"\n✓ Backtest complete | cache: {self.cache.stats}")
         self._add_validation()
@@ -693,7 +764,6 @@ class MainPipelineBacktest:
     # ── Metrics & export ─────────────────────────────────────────
 
     def calculate_metrics(self) -> dict:
-        # โยนภาระไปให้ Evaluator จัดการ
         evaluator = BacktestEvaluator(
             timeframe=self.timeframe,
             days=self.days,
@@ -701,7 +771,6 @@ class MainPipelineBacktest:
             session_manager=self.session_manager
         )
         
-        # รับค่าที่คำนวณและ print เสร็จแล้วกลับมาเก็บในคลาส
         self.metrics = evaluator.calculate_all(self.result_df)
         
         return self.metrics
@@ -722,13 +791,12 @@ class MainPipelineBacktest:
         path = os.path.join(self.output_dir, filename)
         df = self.result_df.copy()
 
-        # ★ [D] เพิ่ม portfolio columns ──────────────────────────────
-        export_cols = [
+        export_cols =[
             "timestamp",
             "close_thai",
-            "portfolio_total_value",  # ★ equity curve
-            "portfolio_cash",  # ★ cash component
-            "portfolio_gold_grams",  # ★ gold held
+            "portfolio_total_value",  
+            "portfolio_cash",  
+            "portfolio_gold_grams",  
             "actual_direction",
             "price_change",
             "net_pnl_thb",
@@ -748,11 +816,12 @@ class MainPipelineBacktest:
             "take_profit",
             "iterations_used",
             "from_cache",
-            "session_id",  # Phase 2
-            "can_execute",  # Phase 2
+            "session_id",  
+            "can_execute",  
+            "sniper_pass",
+            "sniper_reason",
         ]
-        # ────────────────────────────────────────────────────────────
-        export_cols = [c for c in export_cols if c in df.columns]
+        export_cols =[c for c in export_cols if c in df.columns]
 
         with open(path, "w", encoding="utf-8-sig") as f:
             _hdr_model = getattr(
@@ -777,7 +846,6 @@ class MainPipelineBacktest:
 # Helpers
 # ══════════════════════════════════════════════════════════════════
 
-
 def _signal_correct(signal: str, actual: str) -> bool:
     if signal == "HOLD":
         return actual == "FLAT"
@@ -792,20 +860,20 @@ def _signal_correct(signal: str, actual: str) -> bool:
 # Standalone runner
 # ══════════════════════════════════════════════════════════════════
 
-
 def run_main_backtest(
     gold_csv: str,
     news_csv: str = "",
     external_csv: str = "",
     timeframe: str = "1h",
     days: int = 30,
-    start_date: str = None, # 🌟 [NEW]
-    end_date: str = None,   # 🌟 [NEW]
+    start_date: str = None, 
+    end_date: str = None,   
     provider: str = "gemini",
     model: str = "",
     cache_dir: str = DEFAULT_CACHE_DIR,
     output_dir: str = DEFAULT_OUTPUT_DIR,
     react_max_iter: int = 5,
+    sniper_config: dict = None, # 🌟 [FIX] รับค่า SniperConfig
 ) -> dict:
     bt = MainPipelineBacktest(
         gold_csv=gold_csv,
@@ -815,17 +883,17 @@ def run_main_backtest(
         model=model,
         timeframe=timeframe,
         days=days,
-        start_date=start_date, # 🌟 [NEW]
-        end_date=end_date,     # 🌟 [NEW]
+        start_date=start_date, 
+        end_date=end_date,     
         cache_dir=cache_dir,
         output_dir=output_dir,
         react_max_iter=react_max_iter,
+        sniper_config=sniper_config,
     )
     bt.run()
     metrics = bt.calculate_metrics()
     bt.export_csv()
 
-    # Phase 4: Deploy Gate — พิมพ์ PASS/FAIL report ท้าย backtest
     gate = deploy_gate(metrics)
     print_gate_report(gate)
     metrics["deploy_gate"] = gate
@@ -841,7 +909,7 @@ def main():
     import argparse
     import logging
     import sys
-    import yaml  # 🌟 [NEW] เพิ่มไลบรารีนี้เพื่ออ่าน yaml โดยตรง
+    import yaml  
 
     logging.basicConfig(
         level=logging.INFO,
@@ -851,29 +919,27 @@ def main():
         force=True,
     )
 
-    # โหลด Config โครงสร้างเดิม
     config = load_config("config/config.yaml")
 
-    # 🌟 [NEW] แอบอ่านไฟล์ yaml โดยตรง เพื่อดึงค่า start_date / end_date (หลบข้อจำกัดของ Loader)
     cfg_start = None
     cfg_end = None
+    cfg_sniper = None
     try:
         with open("config/config.yaml", "r", encoding="utf-8") as f:
             raw_yaml = yaml.safe_load(f)
             cfg_start = raw_yaml.get("backtest", {}).get("start_date")
             cfg_end   = raw_yaml.get("backtest", {}).get("end_date")
+            cfg_sniper = raw_yaml.get("sniper", {}) # 🌟 [FIX] ดึง Sniper Config จาก yaml
     except Exception as e:
-        logging.warning(f"Failed to read start_date from yaml: {e}")
+        logging.warning(f"Failed to read config from yaml: {e}")
 
     parser = argparse.ArgumentParser(description="Main Pipeline Backtest")
     parser.add_argument("--days", type=int, default=config.days, help="Override days in config")
     parser.add_argument("--timeframe", default=config.timeframe)
-    # รับค่าที่ดึงมาได้เข้า Argument Parser
     parser.add_argument("--start_date", type=str, default=cfg_start, help="Start Date YYYY-MM-DD")
     parser.add_argument("--end_date", type=str, default=cfg_end, help="End Date YYYY-MM-DD")
     args = parser.parse_args()
 
-    # สร้างข้อความสำหรับพิมพ์ Log ว่าใช้โหมดไหน
     mode_text = f"{args.start_date} to {args.end_date}" if (args.start_date and args.end_date) else f"{args.days or 7} Days"
 
     print("=" * 65)
@@ -881,20 +947,20 @@ def main():
     print("=" * 65)
 
     try:
-        # โยนค่าเข้าฟังก์ชันหลัก
         metrics = run_main_backtest(
             gold_csv=config.gold_csv,
             news_csv=config.news_csv,
             external_csv=config.external_csv,
             timeframe=args.timeframe,
             days=args.days,
-            start_date=args.start_date, # 🌟 โยนค่าเข้าไป
-            end_date=args.end_date,     # 🌟 โยนค่าเข้าไป
+            start_date=args.start_date, 
+            end_date=args.end_date,     
             provider=config.provider,
             model=config.model,
             cache_dir=config.cache_dir,
             output_dir=config.output_dir,
             react_max_iter=config.react_max_iter,
+            sniper_config=cfg_sniper, # 🌟 [FIX] โยนค่า Sniper Config เข้าไป
         )
         print("\n✓ Done.")
         return metrics

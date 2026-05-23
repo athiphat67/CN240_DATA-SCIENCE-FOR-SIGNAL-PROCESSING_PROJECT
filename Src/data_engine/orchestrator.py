@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 import time
 from pathlib import Path
 import pandas as pd
 import requests
+from data_engine.hsh_supabase_provider import HshSupabaseMarketDataProvider
 from data_engine.tools.tool_registry import call_tool
 from data_engine.tools.schema_validator import validate_market_state
 from data_engine.tools.interceptor_manager import start_interceptor_background
@@ -20,10 +22,19 @@ _WEEKEND_INSTRUCTION = (
 
 class GoldTradingOrchestrator:
     def __init__(
-        self, history_days=90, interval="5m", max_news_per_cat=5, output_dir=None
+        self,
+        history_days=90,
+        interval="5m",
+        max_news_per_cat=5,
+        output_dir=None,
+        market_data_source=None,
     ):
-        start_interceptor_background()
-
+        self.market_data_source = (
+            market_data_source
+            or os.getenv("MARKET_DATA_SOURCE", "supabase_hsh_ig")
+        )
+        if self.market_data_source != "supabase_hsh_ig":
+            start_interceptor_background()
         self.history_days = history_days
         self.interval = interval
         self.max_news_per_cat = max_news_per_cat
@@ -83,6 +94,15 @@ class GoldTradingOrchestrator:
         effective_days = history_days or self.history_days
         effective_interval = interval or self.interval
 
+        if self.market_data_source == "supabase_hsh_ig":
+            provider = HshSupabaseMarketDataProvider()
+            payload = provider.build_market_state(interval=effective_interval)
+            if save_to_file:
+                save_payload = dict(payload)
+                save_payload.pop("_raw_ohlcv", None)
+                self._save(save_payload)
+            return payload
+
         # ── Step 1: fetch_price (ซึ่งข้างในเรียก fetch_all ที่เราทำ Stitching ไว้แล้ว) ──
         price_result = call_tool(
             "fetch_price", history_days=effective_days, interval=effective_interval
@@ -114,12 +134,12 @@ class GoldTradingOrchestrator:
         if ohlcv_df is not None and not ohlcv_df.empty:
             try:
                 import pandas as pd
-                logger.info("\n" + "="*50)
-                logger.info(f"📊 DEBUG OHLCV DATA (Interval: {effective_interval})")
-                logger.info("="*50)
+                # logger.info("\n" + "="*50)
+                # logger.info(f"📊 DEBUG OHLCV DATA (Interval: {effective_interval})")
+                # logger.info("="*50)
                 
                 # 1. ปริ้น 5 แท่งล่าสุด (ดูแค่ O H L C ให้ดูง่ายๆ)
-                logger.info(f"Last 5 Candles:\n{ohlcv_df[['open', 'high', 'low', 'close']].tail(5)}\n")
+                # logger.info(f"Last 5 Candles:\n{ohlcv_df[['open', 'high', 'low', 'close']].tail(5)}\n")
                 
                 # 2. คำนวณความต่างของเวลา (Delay)
                 last_candle_open = ohlcv_df.index[-1]
@@ -182,6 +202,71 @@ class GoldTradingOrchestrator:
             "fetch_indicators", ohlcv_df=ohlcv_df, interval=effective_interval
         )
 
+        # ── Step 3.5: MTF Trend Analysis (15m + 30m) ──────────────────────────────
+        # [Phase 1] ดึง OHLCV ของ 30m แยกต่างหาก แล้วคำนวณ EMA 20/50 เพื่อหา Regime
+        trend_analysis: dict = {}
+        try:
+            from data_engine.indicators import TechnicalIndicators
+
+            # ── 15m trend (ใช้ข้อมูลที่ดึงมาแล้ว) ──
+            tf_data = {}
+            if ohlcv_df is not None and not ohlcv_df.empty and len(ohlcv_df) >= 50:
+                ti_15m = TechnicalIndicators(ohlcv_df)
+                t15 = ti_15m.trend()
+                latest_close_15m = float(ohlcv_df["close"].iloc[-1])
+                tf_data["15m"] = {
+                    "ema_20": t15.ema_20,
+                    "ema_50": t15.ema_50,
+                    "status": "bullish" if latest_close_15m > t15.ema_50 else "bearish",
+                }
+                logger.info(
+                    f"[MTF] 15m → EMA20={t15.ema_20:.2f} EMA50={t15.ema_50:.2f} "
+                    f"Close={latest_close_15m:.2f} Status={tf_data['15m']['status']}"
+                )
+
+            # ── 30m trend (ดึง OHLCV ใหม่ถ้า effective_interval ไม่ใช่ 30m) ──
+            if effective_interval != "30m":
+                try:
+                    from data_engine.ohlcv_fetcher import OHLCVFetcher
+                    fetcher_30m = OHLCVFetcher()
+                    ohlcv_30m = fetcher_30m.fetch_historical_ohlcv(
+                        days=min(effective_days, 60),
+                        interval="30m",
+                        use_cache=True,
+                    )
+                    if ohlcv_30m is not None and not ohlcv_30m.empty and len(ohlcv_30m) >= 50:
+                        ti_30m = TechnicalIndicators(ohlcv_30m)
+                        t30 = ti_30m.trend()
+                        latest_close_30m = float(ohlcv_30m["close"].iloc[-1])
+                        tf_data["30m"] = {
+                            "ema_20": t30.ema_20,
+                            "ema_50": t30.ema_50,
+                            "status": "bullish" if latest_close_30m > t30.ema_50 else "bearish",
+                        }
+                        logger.info(
+                            f"[MTF] 30m → EMA20={t30.ema_20:.2f} EMA50={t30.ema_50:.2f} "
+                            f"Close={latest_close_30m:.2f} Status={tf_data['30m']['status']}"
+                        )
+                    else:
+                        logger.warning("[MTF] 30m OHLCV insufficient data (<50 candles)")
+                except Exception as e_30m:
+                    logger.warning(f"[MTF] Failed to fetch 30m data: {e_30m}")
+            else:
+                # ถ้า effective_interval == "30m" ใช้ข้อมูลที่มีอยู่แล้ว
+                if ohlcv_df is not None and not ohlcv_df.empty and len(ohlcv_df) >= 50:
+                    ti_30m = TechnicalIndicators(ohlcv_df)
+                    t30 = ti_30m.trend()
+                    latest_close_30m = float(ohlcv_df["close"].iloc[-1])
+                    tf_data["30m"] = {
+                        "ema_20": t30.ema_20,
+                        "ema_50": t30.ema_50,
+                        "status": "bullish" if latest_close_30m > t30.ema_50 else "bearish",
+                    }
+
+            trend_analysis = tf_data
+        except Exception as e_mtf:
+            logger.warning(f"[MTF] Trend analysis failed — skipping: {e_mtf}")
+
         # ── Step 4: fetch_news & Assemble ──
         news_result = call_tool("fetch_news", max_per_category=self.max_news_per_cat)
 
@@ -192,7 +277,7 @@ class GoldTradingOrchestrator:
             effective_days,
             effective_interval,
             price_trend=price_trend,
-            recent_trades=recent_trades,
+            trend_analysis=trend_analysis,
         )
 
         schema_errors = validate_market_state(payload)
@@ -205,7 +290,7 @@ class GoldTradingOrchestrator:
         payload["_raw_ohlcv"] = ohlcv_df
         return payload
 
-    def _assemble_payload(self, price, ind, news, history_days, interval=None, price_trend=None, recent_trades=None) -> dict:
+    def _assemble_payload(self, price, ind, news, history_days, interval=None, price_trend=None, recent_trades=None, trend_analysis=None) -> dict:
         spot = price.get("spot_price_usd", {})
         thai = price.get("thai_gold_thb", {})
         ind_d = ind.get("indicators", {})
@@ -258,14 +343,37 @@ class GoldTradingOrchestrator:
             "mid_price_thb", round((sell + buy) / 2, 2) if sell and buy else 0
         )
         thai.setdefault("timestamp", thai.get("timestamp", now_thai))
-        spread_thb = round(float(sell) - float(buy), 2) if sell and buy else 0.0
+        # [FIX v11-B] spread = sell - buy (positive)
+        # thai["sell_price_thb"] = ราคาที่ร้านขาย = คุณจ่าย = สูงกว่า (71,104)
+        # thai["buy_price_thb"]  = ราคาที่ร้านซื้อ = คุณได้รับ = ต่ำกว่า (71,080)
+        # spread = sell - buy = 71,104 - 71,080 = +24 THB ✅
+        # [v2 comment ผิด: "buy - sell (positive)" จริงๆ ได้ -24 ทำให้ edge_score = 0 ตลอด]
+        spread_thb = round(max(0.0, float(sell) - float(buy)), 2) if sell and buy else 0.0
         effective_spread = spread_thb
 
-        # expected move (THB) estimate from latest candle % change
+        # [FIX v11] ATR-based expected_move — แก้ bug ที่ใช้ single-candle % change
+        # ❌ เดิม: ref_price × 0.01% = ~7 THB → edge=0.07 (ต่ำเกินจริงในช่วง low-volatility candle)
+        # ✅ ใหม่: ATR สะท้อน volatility จริงของ session → ~111 THB → edge=1.18 ผ่าน threshold
         trend_change_pct = abs(float((price_trend or {}).get("change_pct", 0.0) or 0.0))
-        ref_price = float(thai.get("mid_price_thb") or sell or 0.0)
-        expected_move_thb = round(ref_price * (trend_change_pct / 100.0), 2) if ref_price > 0 else 0.0
+        ref_price = float(thai.get("mid_price_thb") or buy or 0.0)
+        atr_thb = float((ind_d or {}).get("atr", {}).get("value", 0) or 0)
+
+        if atr_thb > 0:
+            expected_move_thb = round(atr_thb, 2)
+            _move_method = "ATR"
+        elif ref_price > 0 and trend_change_pct > 0:
+            expected_move_thb = round(ref_price * (trend_change_pct / 100.0), 2)
+            _move_method = "candle_pct_fallback"
+        else:
+            expected_move_thb = 0.0
+            _move_method = "zero"
+
         edge_score = round((expected_move_thb / effective_spread), 4) if effective_spread > 0 else 0.0
+        logger.info(
+            "[EdgeScore] method=%s atr=%.0f candle_pct=%.4f%% expected_move=%.2f THB "
+            "spread=%.2f THB edge=%.4f",
+            _move_method, atr_thb, trend_change_pct, expected_move_thb, effective_spread, edge_score,
+        )
 
         # ── forex: [FIX B5] รับ source จาก fetch_price ด้วย ──────────────────
         forex_data = price.get("forex", {})
@@ -305,18 +413,9 @@ class GoldTradingOrchestrator:
         latest_news = latest_news[:10]
 
         effective_interval = interval or self.interval
-        portfolio = price.get("portfolio", {}) if isinstance(price.get("portfolio", {}), dict) else {}
-        trades_today = int(portfolio.get("trades_today", 0) or 0)
-        daily_target_entries = 6
-        remaining_entries = max(0, daily_target_entries - trades_today)
-        now_hour = get_thai_time().hour
-        current_slot = min(6, max(1, (now_hour // 4) + 1))
-        min_entries_by_now = max(0, current_slot - 1)
-
-        # safety budget ladder (Phase C): late slots require higher confidence
-        slot_conf_ladder = [0.62, 0.62, 0.66, 0.68, 0.72, 0.75]
-        slot_pos_ladder = [1000, 1000, 1000, 1000, 1000, 1000]
-        next_slot_index = min(trades_today, daily_target_entries - 1)
+        daily_target_entries = 100  # [FIX v13] Increased for aggressive scalping
+        
+        # [v12] 3 slots: early=0.60, mid=0.63, late=0.67 (ลด ~3% ต่อ slot)
 
         return {
             "meta": {
@@ -339,6 +438,8 @@ class GoldTradingOrchestrator:
                     "expected_move_thb": expected_move_thb,
                     "expected_move": expected_move_thb,
                     "edge_score": edge_score,
+                    "move_method": _move_method,   # [FIX v11] ATR | candle_pct_fallback | zero
+                    "atr_thb": atr_thb,            # [FIX v11] raw ATR value used
                 },
                 "recent_price_action": price.get("recent_price_action", []),
                 "price_trend": price_trend or {},
@@ -350,18 +451,7 @@ class GoldTradingOrchestrator:
                 "latest_news": latest_news,
                 "news_count": len(latest_news),
             },
-            "portfolio": portfolio,
-            "execution_quota": {
-                "daily_target_entries": daily_target_entries,
-                "entries_done": trades_today,
-                "entries_remaining": remaining_entries,
-                "quota_met": trades_today >= daily_target_entries,
-                "current_slot": current_slot,
-                "min_entries_by_now": min_entries_by_now,
-                "required_confidence_for_next_buy": slot_conf_ladder[next_slot_index],
-                "recommended_next_position_thb": slot_pos_ladder[next_slot_index],
-            },
-            "recent_trades": recent_trades or [],
+            "trend_analysis": trend_analysis or {},   # [MTF Phase 1] 15m+30m EMA trend
             "interval": effective_interval,  # [FIX B2]
             "timestamp": now_thai,
         }
@@ -386,6 +476,10 @@ class GoldTradingOrchestrator:
             "portfolio_summary",
             "backtest_directive",
             "recent_trades",
+            "dynamic_weights",
+            "xgb_signal",
+            "trend_analysis",    # [MTF Phase 1] 15m+30m regime data
+            "market_regime",     # [MTF Phase 2] classified regime label
         ]:
             if key in full_state:
                 slim[key] = full_state[key]
