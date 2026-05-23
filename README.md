@@ -105,6 +105,18 @@ HSH965 tick (WebSocket)
 
 ---
 
+## เอกสารและ Presentation
+
+| Iteration | ไฟล์ |
+|---|---|
+| Iteration 1 | [Documentation/Presentations/CN240_Presentation_Iteration1.pdf](Documentation/Presentations/CN240_Presentation_Iteration1.pdf) |
+| Iteration 2 | [Documentation/Presentations/CN240_Presentation_Iteration2.pdf](Documentation/Presentations/CN240_Presentation_Iteration2.pdf) |
+| Iteration 3 | [Documentation/Presentations/CN240_Presentation_Iteration3.pdf](Documentation/Presentations/CN240_Presentation_Iteration3.pdf) |
+
+โน้ตบุ๊ก EDA และ Feature Engineering อยู่ใน `Documentation/` (`Phase2_EDA.ipynb`, `Phase2_FeatureEngineering.ipynb`)
+
+---
+
 ## ทีมงาน
 
 | ชื่อ | Student ID |
