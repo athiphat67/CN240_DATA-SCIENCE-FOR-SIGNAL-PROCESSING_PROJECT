@@ -121,8 +121,8 @@ def _normalize_provider(provider: str) -> str:
     return provider
 
 
-DAILY_TARGET_ENTRIES = 8
-QUOTA_CONFIDENCE_LADDER = (0.40, 0.40, 0.40)
+DAILY_TARGET_ENTRIES = 100
+QUOTA_CONFIDENCE_LADDER = (0.35, 0.50, 0.55)
 QUOTA_POSITION_LADDER_THB = (1000, 1000, 1000)
 
 
@@ -171,43 +171,9 @@ def build_execution_quota_from_portfolio(
     if entries_done_override is None:
         entries_done_override = trades_today_override
 
-    if entries_done_override is not None and entries_done_override >= 0:
-        entries_done = max(0, _safe_int(entries_done_override))
-        entries_done_source = "trade_log"
-    else:
-        entries_done = max(0, _safe_int(portfolio.get("trades_today", 0)))
-        entries_done_source = "portfolio_fallback"
-
-    exits_done = max(0, _safe_int(exits_done_override))
-    total_trades_today = (
-        max(0, _safe_int(total_trades_today_override))
-        if total_trades_today_override is not None
-        else entries_done + exits_done
-    )
-    entries_this_session = max(
-        0,
-        _safe_int(
-            portfolio.get(
-                "entries_this_session",
-                portfolio.get("trades_this_session", 0),
-            )
-        ),
-    )
-    entries_remaining = max(0, DAILY_TARGET_ENTRIES - entries_done)
-    quota_met = entries_done >= DAILY_TARGET_ENTRIES
-
-    # Time-of-day window (1=morning, 2=afternoon, 3=evening) — used for pacing.
-    time_window = _current_quota_slot()
-    # Scale the existing pacing rule (one ladder rung per time-window) to the
-    # new DAILY_TARGET_ENTRIES so "entries expected by now" stays meaningful.
-    min_entries_by_now = ((time_window - 1) * DAILY_TARGET_ENTRIES) // 3
-
-    # current_slot is now entry-progress (Nth entry of the day, 1..target).
-    current_slot = min(entries_done + 1, DAILY_TARGET_ENTRIES)
-
-    # Safe-clamp the ladder index so any future bump of DAILY_TARGET_ENTRIES
-    # past len(LADDER) cannot raise IndexError.
-    ladder_index = min(max(0, entries_done), len(QUOTA_CONFIDENCE_LADDER) - 1)
+    current_slot = _current_quota_slot()
+    min_entries_by_now = max(0, current_slot - 1)
+    next_slot_index = min(trades_today, len(QUOTA_CONFIDENCE_LADDER) - 1)
     recommended_position = (
         0 if quota_met else QUOTA_POSITION_LADDER_THB[ladder_index]
     )
@@ -277,6 +243,7 @@ class AnalysisService:
         persistence=None,
         discord_notifier: DiscordNotifier = None,
         telegram_notifier: TelegramNotifier = None,
+        xgb_fetcher=None,
     ):
         self.skill_registry = skill_registry
         self.role_registry = role_registry
@@ -284,8 +251,10 @@ class AnalysisService:
         self.persistence = persistence
         self.discord_notifier = discord_notifier
         self.telegram_notifier = telegram_notifier
-        self.max_retries = SERVICE_CONFIG["max_retries"]
+        self.xgb_fetcher       = xgb_fetcher
+        self.max_retries       = SERVICE_CONFIG["max_retries"]
         sys_logger.info(f"AnalysisService initialized (max_retries={self.max_retries})")
+        sys_logger.info(f"XGBoost fetcher: {'enabled' if xgb_fetcher else 'disabled'}")
         self.risk_manager = RiskManager()
         sys_logger.info("RiskManager initialized as singleton")
 
@@ -455,6 +424,20 @@ class AnalysisService:
 
                 sys_logger.info("Market data fetched successfully")
 
+                # ── XGBoost Dual-Model Signal ──────────────────────────────
+                # เรียก BUY/SELL Model แล้ว inject สัญญาณเข้า market_state
+                # ให้ LLM Agent เห็นเป็น context เพิ่มเติมในการตัดสินใจ
+                if self.xgb_fetcher:
+                    try:
+                        xgb_signal = self.xgb_fetcher(market_state)
+                        market_state["xgboost_signal"] = xgb_signal
+                        sys_logger.info(f"[XGBoost] Signal injected into market_state: {xgb_signal}")
+                    except Exception as _xgb_err:
+                        sys_logger.warning(f"[XGBoost] Failed, using HOLD: {_xgb_err}")
+                        market_state["xgboost_signal"] = "HOLD"
+                else:
+                    market_state["xgboost_signal"] = None
+                
                 sys_logger.info("Starting Async Pre-fetch for Tools...")
                 # ถ้าไฟล์นี้รันอยู่ใน async function อยู่แล้ว ใช้ await ได้เลย
                 # แต่ถ้าไฟล์นี้เป็นฟังก์ชันธรรมดา (sync) ต้องใช้ asyncio.run() ครอบ
@@ -1149,10 +1132,10 @@ class AnalysisService:
                 # fast path: ไม่ใช้ tool loop → readiness check ไม่มีผล
                 react_config = ReactConfig(max_iterations=1, max_tool_calls=0)
             else:
-                # [P1] inject ReadinessConfig — required_indicators เปลี่ยนได้โดยไม่แตะ checker
+                # [v3.5] ปิดการใช้ ReAct loop — ใช้ Single-Shot Analysis เพื่อความรวดเร็ว
                 react_config = ReactConfig(
-                    max_iterations=3,
-                    max_tool_calls=5,
+                    max_iterations=1,
+                    max_tool_calls=0,
                     readiness=ReadinessConfig(
                         required_indicators=[
                             "rsi",
@@ -1181,108 +1164,76 @@ class AnalysisService:
             current_session = gate_res.session_id if gate_res.apply_gate else "Morning"
             is_market_open = gate_res.apply_gate
 
-            # 2. สร้าง Predictor
-            predictor = XGBoostPredictor(
-                repo_id="athiphatss/Xgboost_HSH965_gold_trading_signal",
-                filename="feature_columns.json",
-            )
+            # # 2. สร้าง Predictor
+            # predictor = XGBoostPredictor(
+            #     repo_id="athiphatss/Xgboost_HSH965_gold_trading_signal",
+            #     filename="feature_columns.json"
+            # )
 
-            # 3. เตรียม features_dict
-            features_dict = {
-                "xauusd_open": market_state.get("market_data", {})
-                .get("ohlcv", {})
-                .get("open", 0.0),
-                "xauusd_high": market_state.get("market_data", {})
-                .get("ohlcv", {})
-                .get("high", 0.0),
-                "xauusd_low": market_state.get("market_data", {})
-                .get("ohlcv", {})
-                .get("low", 0.0),
-                "xauusd_close": market_state.get("market_data", {})
-                .get("ohlcv", {})
-                .get("close", 0.0),
-                "hour_sin": np.sin(2 * np.pi * datetime.now().hour / 24),
-                "hour_cos": np.cos(2 * np.pi * datetime.now().hour / 24),
-                "day_of_week": datetime.now().weekday(),
-            }
+            # # 3. เตรียม features_dict
+            # features_dict = {
+            #     "xauusd_open": market_state.get("market_data", {}).get("ohlcv", {}).get("open", 0.0),
+            #     "xauusd_high": market_state.get("market_data", {}).get("ohlcv", {}).get("high", 0.0),
+            #     "xauusd_low": market_state.get("market_data", {}).get("ohlcv", {}).get("low", 0.0),
+            #     "xauusd_close": market_state.get("market_data", {}).get("ohlcv", {}).get("close", 0.0),
+            #     "hour_sin": np.sin(2 * np.pi * datetime.now().hour / 24),
+            #     "hour_cos": np.cos(2 * np.pi * datetime.now().hour / 24),
+            #     "day_of_week": datetime.now().weekday(),
+            # }
 
-            # 4. รัน Predictor เพื่อเอา XGBoost Signal
-            xgb_out = predictor.predict(features_dict, session=current_session)
-            # print(xgb_out)
+            # # 4. รัน Predictor เพื่อเอา XGBoost Signal
+            # xgb_out = predictor.predict(features_dict, session=current_session)
+            # # print(xgb_out)
+            
+            # # --- [NEW] 5. คำนวณ Dynamic Weights ---
+            # # ดึงทิศทางจาก 3 แหล่ง
+            # xgb_dir = str(getattr(xgb_out, "signal", "HOLD")).upper()
+            
+            # news_score = market_state.get("news", {}).get("sentiment_score", 0.0)
+            # news_dir = "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
+            
+            # tech_trend = market_state.get("technical_indicators", {}).get("trend", {}).get("trend", "").lower()
+            # tech_dir = "BUY" if "up" in tech_trend else "SELL" if "down" in tech_trend else "HOLD"
 
-            # --- [NEW] 5. คำนวณ Dynamic Weights ---
-            # ดึงทิศทางจาก 3 แหล่ง
-            xgb_dir = str(getattr(xgb_out, "signal", "HOLD")).upper()
+            # # กำหนดน้ำหนักตาม Session
+            # if is_market_open and current_session == "Evening":
+            #     w_xgb, w_news, w_tech = 0.35, 0.45, 0.20
+            # elif current_session == "Morning":
+            #     w_xgb, w_news, w_tech = 0.55, 0.15, 0.30
+            # else:
+            #     w_xgb, w_news, w_tech = 0.50, 0.20, 0.30
 
-            news_score = market_state.get("news", {}).get("sentiment_score", 0.0)
-            news_dir = (
-                "BUY" if news_score > 0.5 else "SELL" if news_score < -0.5 else "HOLD"
-            )
+            # # คำนวณคะแนน
+            # bull_score, bear_score = 0.0, 0.0
+            
+            # if xgb_dir == "BUY": bull_score += w_xgb
+            # elif xgb_dir == "SELL": bear_score += w_xgb
+            
+            # if news_dir == "BUY": bull_score += w_news
+            # elif news_dir == "SELL": bear_score += w_news
+            
+            # if tech_dir == "BUY": bull_score += w_tech
+            # elif tech_dir == "SELL": bear_score += w_tech
 
-            tech_trend = (
-                market_state.get("technical_indicators", {})
-                .get("trend", {})
-                .get("trend", "")
-                .lower()
-            )
-            tech_dir = (
-                "BUY"
-                if "up" in tech_trend
-                else "SELL"
-                if "down" in tech_trend
-                else "HOLD"
-            )
+            # # สรุปผล
+            # if bull_score > bear_score:
+            #     final_dir, base_conf = "BUY", bull_score
+            # elif bear_score > bull_score:
+            #     final_dir, base_conf = "SELL", bear_score
+            # else:
+            #     # ถ้าคะแนนเท่ากัน ให้ใช้ค่าเฉลี่ยของน้ำหนักที่เหลืออยู่ แทนการล็อค 0.5
+            #     final_dir, base_conf = "HOLD", (bull_score + bear_score) / 2 if (bull_score + bear_score) > 0 else 0.35
 
-            # กำหนดน้ำหนักตาม Session
-            if is_market_open and current_session == "Evening":
-                w_xgb, w_news, w_tech = 0.35, 0.45, 0.20
-            elif current_session == "Morning":
-                w_xgb, w_news, w_tech = 0.55, 0.15, 0.30
-            else:
-                w_xgb, w_news, w_tech = 0.50, 0.20, 0.30
-
-            # คำนวณคะแนน
-            bull_score, bear_score = 0.0, 0.0
-
-            if xgb_dir == "BUY":
-                bull_score += w_xgb
-            elif xgb_dir == "SELL":
-                bear_score += w_xgb
-
-            if news_dir == "BUY":
-                bull_score += w_news
-            elif news_dir == "SELL":
-                bear_score += w_news
-
-            if tech_dir == "BUY":
-                bull_score += w_tech
-            elif tech_dir == "SELL":
-                bear_score += w_tech
-
-            # สรุปผล
-            if bull_score > bear_score:
-                final_dir, base_conf = "BUY", bull_score
-            elif bear_score > bull_score:
-                final_dir, base_conf = "SELL", bear_score
-            else:
-                # ถ้าคะแนนเท่ากัน ให้ใช้ค่าเฉลี่ยของน้ำหนักที่เหลืออยู่ แทนการล็อค 0.5
-                final_dir, base_conf = (
-                    "HOLD",
-                    (bull_score + bear_score) / 2
-                    if (bull_score + bear_score) > 0
-                    else 0.35,
-                )
-
-            # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
-            market_state["dynamic_weights"] = {
-                "session": current_session,
-                "xgb_w": w_xgb,
-                "news_w": w_news,
-                "tech_w": w_tech,
-                "direction": final_dir,
-                "base_confidence": round(base_conf, 2),
-            }
-
+            # # ยัดใส่ market_state ให้ PromptBuilder เอาไปใช้
+            # market_state["dynamic_weights"] = {
+            #     "session": current_session,
+            #     "xgb_w": w_xgb,
+            #     "news_w": w_news,
+            #     "tech_w": w_tech,
+            #     "direction": final_dir,
+            #     "base_confidence": round(base_conf, 2)
+            # }
+            
             slim_state = self.data_orchestrator.pack(market_state)
 
             _portfolio_trades = market_state.get("portfolio", {}).get(
@@ -1831,7 +1782,7 @@ class HistoryService:
 # ─────────────────────────────────────────────
 
 
-def init_services(skill_registry, role_registry, data_orchestrator, db):
+def init_services(skill_registry, role_registry, data_orchestrator, db, xgb_fetcher=None):
     """Initialize all services with dependency injection"""
 
     # สร้าง notifier instances
@@ -1851,12 +1802,13 @@ def init_services(skill_registry, role_registry, data_orchestrator, db):
     )
 
     analysis_service = AnalysisService(
-        skill_registry=skill_registry,
-        role_registry=role_registry,
-        data_orchestrator=data_orchestrator,
-        persistence=db,
-        discord_notifier=discord_notifier,  # ← INJECT DISCORD
-        telegram_notifier=telegram_notifier,  # ← INJECT TELEGRAM
+        skill_registry    = skill_registry,
+        role_registry     = role_registry,
+        data_orchestrator = data_orchestrator,
+        persistence       = db,
+        discord_notifier  = discord_notifier,    # ← INJECT DISCORD
+        telegram_notifier = telegram_notifier,   # ← INJECT TELEGRAM
+        xgb_fetcher       = xgb_fetcher,         # ← INJECT XGBOOST
     )
     portfolio_service = PortfolioService(db)
     history_service = HistoryService(db)

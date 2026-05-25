@@ -413,10 +413,7 @@ class GoldTradingOrchestrator:
         latest_news = latest_news[:10]
 
         effective_interval = interval or self.interval
-        # NOTE: orchestrator no longer owns the daily target — it is sourced
-        # from ui.core.services.DAILY_TARGET_ENTRIES via build_execution_quota_from_portfolio.
-        # Local literal removed to avoid drift.
-        daily_target_entries = 8  # kept as a reference; not consumed downstream
+        daily_target_entries = 100  # [FIX v13] Increased for aggressive scalping
         
         # [v12] 3 slots: early=0.60, mid=0.63, late=0.67 (ลด ~3% ต่อ slot)
 

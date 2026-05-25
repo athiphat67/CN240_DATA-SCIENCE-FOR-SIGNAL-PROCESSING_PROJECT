@@ -23,8 +23,8 @@ FEATURE_COLUMNS = [
     "session_progress", "day_of_week",
 ]
 
-BUY_THRESHOLD  = 0.80
-SELL_THRESHOLD = 0.60
+BUY_THRESHOLD  = 0.55
+SELL_THRESHOLD = 0.55
 CONFLICT_GAP   = 0.20
 HIGH_ACCURACY_SESSIONS = {"Evening"}
 

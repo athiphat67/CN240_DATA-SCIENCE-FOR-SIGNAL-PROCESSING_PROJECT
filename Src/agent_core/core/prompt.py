@@ -726,11 +726,11 @@ class PromptBuilder:
             lines += [
                 "",
                 "── Daily Entry Quota ──",
-                f"  Target entries/day: {target}",
-                f"  Entries done:       {entries_done}",
-                f"  Entries remaining:  {entries_remaining}",
+                f"  Target entries/day: {quota.get('daily_target_entries', 100)}",
+                f"  Entries done:       {quota.get('entries_done', 0)}",
+                f"  Entries remaining:  {quota.get('entries_remaining', 0)}",
                 f"  Quota met:          {quota.get('quota_met', False)}",
-                f"  Current slot:       {quota.get('current_slot', 'N/A')} / {target}",
+                f"  Current slot:       {quota.get('current_slot', 'N/A')}",
                 f"  Min entries by now: {quota.get('min_entries_by_now', 'N/A')}",
                 f"  Next BUY min conf:  {quota.get('required_confidence_for_next_buy', 'N/A')}",
                 f"  Next BUY size:      {quota.get('recommended_next_position_thb', 'N/A')} THB",
@@ -754,7 +754,7 @@ class PromptBuilder:
             can_sell = f"YES ({gold_g:.4f}g held)" if gold_g > 0 else "NO — no gold held (short selling not supported)"
 
             pnl_status = portfolio.get("risk_status", "")
-            pnl_tag = f"  ← {pnl_status} (You MUST NOT SELL if this is negative, unless SL is hit)" if pnl < 0 else "  ← PROFITABLE (Ready to SELL if momentum drops)"
+            pnl_tag = f"  ← {pnl_status} (CRITICAL: If Price <= SL, signal SELL immediately. Do not wait.)" if pnl < 0 else "  ← PROFITABLE (Ready to SELL if momentum drops)"
 
             lines += [
                 "",

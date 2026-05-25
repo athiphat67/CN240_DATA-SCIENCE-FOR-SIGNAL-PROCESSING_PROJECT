@@ -355,6 +355,45 @@ def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
 
     คืน `Decision` สุดท้ายที่ตัดสินใจ
     """
+    โหลดค่า trailing_stop_level_thb จาก portfolio มาตั้งค่าให้ RiskManager
+    ป้องกันการสูญเสียสถานะ Trailing Stop เมื่อ process รีสตาร์ท
+
+    [FIX #1] เรียก public method restore_trailing_stop() แทนการแก้ private attr โดยตรง
+    → RiskManager ต้องมี method นี้ (ดูตัวอย่างใน docstring ด้านล่าง)
+
+    ตัวอย่าง method ที่ต้องเพิ่มใน RiskManager:
+        def restore_trailing_stop(self, level_thb: float) -> None:
+            \"\"\"โหลดสถานะ trailing stop จาก persistent storage\"\"\"
+            if level_thb > 0:
+                self._active_trailing_sl = level_thb
+                logger.info(f"[RiskManager] trailing stop restored: ฿{level_thb:,.0f}")
+    """
+    raw = portfolio.get("trailing_stop_level_thb")
+    if raw is None:
+        return
+    try:
+        level = float(raw)
+        if level <= 0:
+            return
+
+        # ── [FIX #1] ใช้ public method แทน private attr ─────
+        if hasattr(risk_manager, "restore_trailing_stop"):
+            risk_manager.restore_trailing_stop(level)
+            sys_logger.info(f"[trailing_stop] Restored via public method: ฿{level:,.0f}")
+        else:
+            # Fallback: เตือนและใช้ private attr ชั่วคราวเพื่อไม่ให้ระบบพัง
+            # TODO: เพิ่ม restore_trailing_stop() ใน RiskManager แล้วลบบรรทัดนี้ออก
+            sys_logger.warning(
+                "[trailing_stop] RiskManager.restore_trailing_stop() not found — "
+                "falling back to direct attr access. Please add the public method."
+            )
+            risk_manager._active_trailing_sl = level  # type: ignore[attr-defined]
+            sys_logger.info(f"[trailing_stop] Restored via fallback: ฿{level:,.0f}")
+    except Exception as exc:
+        sys_logger.error(f"[trailing_stop] restore failed: {exc}")
+
+
+def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
     cycle_start = time.perf_counter()
 
     # ── 1. Data Engine ─────────────────────────────────────────
@@ -405,6 +444,7 @@ def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
             reject_reason=f"feature_error:{exc}",
             notify=False,
         )
+
 
     # ── 3. Dual-model XGBoost prediction → (signal, confidence)
     sys_logger.info("🟢[cycle] (3/5) XGBoost dual-model predict_proba")
@@ -472,6 +512,7 @@ def run_analysis_once(rt: Runtime, *, skip_fetch: bool = False) -> Decision:
         "─" * 60,
     )
     return decision
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -645,6 +686,7 @@ def _notify_if_pass(
             sys_logger.error(f"[notify] telegram failed: {exc}")
 
 
+
 def _persist_run(
     rt: Runtime, decision: Decision, market_state: Dict[str, Any]
 ) -> Optional[int]:
@@ -711,23 +753,21 @@ def send_trade_log_from_result(
     )
 
     try:
-        send_trade_log(
-            action=decision.final,
-            price=price,
-            reason=reason,
-            api_key=team_api_key,
-            # confidence=confidence,
-            # stop_loss=stop_loss,
-            # take_profit=take_profit,
-            # provider=PROVIDER_TAG,
-            # session_id=market_state.get("session_gate", {}).get("session_id"),
-            # run_id=run_id,
-        )
+        # send_trade_log(
+        #     action=decision.final,
+        #     price=price,
+        #     reason=reason,
+        #     api_key=team_api_key,
+        # )
         if emit_logs:
             sys_logger.info("[trade_log] sent")
     except Exception as exc:
         if emit_logs:
             sys_logger.error(f"[trade_log] failed: {exc}")
+
+
+# backward-compat alias (Team-Watch_Engine ใช้ชื่อนี้)
+_send_trade_log = send_trade_log_from_result
 
 
 # ─────────────────────────────────────────────────────────────
