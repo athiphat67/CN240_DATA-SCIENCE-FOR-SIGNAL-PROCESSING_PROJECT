@@ -35,11 +35,6 @@ The project runs two parallel systems:
 | **Database** | Supabase (PostgreSQL) | PostgreSQL |
 | **Notifications** | Discord Webhook | Discord + Telegram |
 
-<p align="center">
-  <img src="Documentation/Pigture/System%20arhcitecture%20ML.png" alt="LambdaMART ML architecture" width="49%" />
-  <img src="Documentation/Pigture/System%20Architecture%20React%20Loop.png" alt="ReAct loop architecture" width="49%" />
-</p>
-
 ---
 
 ## 🏗️ System Architecture
