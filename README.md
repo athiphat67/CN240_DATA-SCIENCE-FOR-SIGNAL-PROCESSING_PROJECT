@@ -11,46 +11,55 @@
 [![Supabase](https://img.shields.io/badge/Database-Supabase-3ECF8E?logo=supabase)](https://supabase.com)
 [![License](https://img.shields.io/badge/License-Academic%20Use%20Only-lightgrey)]()
 
-**ระบบ AI Signal Generator สำหรับการเทรดทองคำ HSH965 โดยใช้ Machine Learning และ LLM Agent**
+**An AI Signal Generator for HSH965 gold trading, powered by Machine Learning and an LLM Agent**
 
 ---
 
-[🚀 เริ่มต้นใช้งาน](#️-การติดตั้ง) · [🏗️ สถาปัตยกรรม](#️-สถาปัตยกรรมระบบ) · [📁 โครงสร้างโปรเจกต์](#-โครงสร้างโปรเจกต์) · [⚙️ การติดตั้ง](#️-การติดตั้ง) · [🧪 การทดสอบ](#-การทดสอบ) · [👥 ทีมงาน](#-ทีมงาน)
+[🚀 Getting Started](#️-installation) · [🏗️ Architecture](#️-system-architecture) · [📁 Project Structure](#-project-structure) · [⚙️ Installation](#️-installation) · [👥 Team](#-team)
 
 </div>
 
 ---
 
-## 📌 ภาพรวมโปรเจกต์
+## 📌 Overview
 
-**นักขุดทอง** คือระบบ Signal Generator ที่วิเคราะห์ราคาทองคำ HSH965 แล้วส่งสัญญาณ BUY / SELL ให้ผู้ใช้ตัดสินใจเทรดเอง ระบบ **ไม่ได้เทรดอัตโนมัติ** — บอทเพียงบอกว่า "ตอนนี้น่าซื้อ" หรือ "ตอนนี้น่าขาย" ทุก 10 นาที ผ่าน Discord
+**นักขุดทอง (Gold Digger)** is a signal generator that analyzes HSH965 gold prices and sends BUY / SELL signals for the user to make their own trading decisions. The system **does not trade automatically** — the bot simply tells you "now looks like a good time to buy" or "now looks like a good time to sell" every 10 minutes via Discord.
 
-โปรเจกต์นี้มี 2 ระบบคู่ขนาน:
+The project runs two parallel systems:
 
-| | **Src_V4** (ระบบหลัก) | **Src/** (ระบบสำรอง) |
+| | **Src_V4** (Main) | **Src/** (Fallback) |
 |---|---|---|
-| **แนวทาง** | Machine Learning (XGBoost LambdaMART) | ReAct LLM Agent + News Sentiment |
-| **Model** | LambdaMART v11 · 420 trees · Timeframe M10 | Gemini / Groq + FinBERT |
-| **Output** | BUY / SELL signal ทุก 10 นาที | BUY / SELL / HOLD พร้อม rationale |
+| **Approach** | Machine Learning (XGBoost LambdaMART) | ReAct LLM Agent + News Sentiment |
+| **Model** | LambdaMART v11 · 420 trees · M10 timeframe | Gemini / Groq + FinBERT |
+| **Output** | BUY / SELL signal every 10 minutes | BUY / SELL / HOLD with rationale |
 | **Database** | Supabase (PostgreSQL) | PostgreSQL |
-| **แจ้งเตือน** | Discord Webhook | Discord + Telegram |
+| **Notifications** | Discord Webhook | Discord + Telegram |
+
+<p align="center">
+  <img src="Documentation/Pigture/System%20arhcitecture%20ML.png" alt="LambdaMART ML architecture" width="49%" />
+  <img src="Documentation/Pigture/System%20Architecture%20React%20Loop.png" alt="ReAct loop architecture" width="49%" />
+</p>
 
 ---
 
-## 🏗️ สถาปัตยกรรมระบบ
+## 🏗️ System Architecture
 
-### Src_V4 — ML Pipeline (ระบบหลัก)
+### 1️⃣ Src_V4 — ML Pipeline (Main System)
+
+The primary production system. It streams live HSH965 tick data over WebSocket, builds M10 candles, engineers 40+ technical features, and feeds them into a trained LambdaMART (XGBoost Ranker) model that scores each new bar into a BUY / SELL signal. Every signal passes a state-guarded signal gate (EMPTY / HOLDING) before being recorded to Supabase and broadcast through a Discord webhook with a human-readable rationale.
+
+![LambdaMART ML architecture](Documentation/Pigture/System%20arhcitecture%20ML.png)
 
 ```
 HSH965 tick (WebSocket)
     │
     ▼
 [Phase 1] M10 Candle Builder
-    │  สร้าง OHLCV candle จาก tick data ทุก 10 นาที
+    │  Builds OHLCV candles from tick data every 10 minutes
     │
     ▼
 [Phase 2] Feature Engine
-    │  คำนวณ 40+ features: RSI, EMA, OLS Slope, Volume Profile ฯลฯ
+    │  Computes 40+ features: RSI, EMA, OLS Slope, Volume Profile, etc.
     │
     ▼
 [Phase 3] LambdaMART v11 Inference
@@ -58,16 +67,20 @@ HSH965 tick (WebSocket)
     │
     ▼
 [Phase 4] Signal Gate + State Manager
-    │  กรอง signal + State Guard (EMPTY / HOLDING)
+    │  Signal filtering + State Guard (EMPTY / HOLDING)
     │
     ▼
 [Phase 5] Signal Recorder
     │
-    ├─► Supabase (PostgreSQL)   ← บันทึก signals, features, system_state
-    └─► Discord Webhook         ← แจ้งเตือน @mention พร้อม rationale
+    ├─► Supabase (PostgreSQL)   ← stores signals, features, system_state
+    └─► Discord Webhook         ← @mention notification with rationale
 ```
 
-### Src/ — LLM Agent Pipeline (ระบบสำรอง)
+### 2️⃣ Src/ — ReAct LLM Agent Pipeline (Fallback System)
+
+The fallback system. A ReAct-based LLM agent (Gemini / Groq) that runs an iterative reasoning loop over live market data and macro news: the Data Engine gathers indicators and FinBERT news sentiment, the ReAct loop analyzes and debates through tool calls, and the Risk Manager validates the final BUY / SELL / HOLD decision with a written rationale before logging to PostgreSQL and notifying via Discord / Telegram and the Gradio dashboard.
+
+![ReAct loop architecture](Documentation/Pigture/System%20Architecture%20React%20Loop.png)
 
 ```
 Market Data (TwelveData / yfinance)  +  News (GDELT / Finnhub)
@@ -79,7 +92,7 @@ Market Data (TwelveData / yfinance)  +  News (GDELT / Finnhub)
     ▼
 [Agent Core] ReAct Loop (LLM)
     │  Gemini / Groq + FinBERT sentiment
-    │  วิเคราะห์และ debate ผ่าน Tool calls
+    │  analyzes and debates through tool calls
     │
     ▼
 [Risk Manager] → BUY / SELL / HOLD + written rationale
@@ -91,38 +104,37 @@ Market Data (TwelveData / yfinance)  +  News (GDELT / Finnhub)
 
 ---
 
-## 📁 โครงสร้างโปรเจกต์
+## 📁 Project Structure
 
 ```
 นักขุดทอง/
 │
-├── Src_V4/                         ← ระบบหลัก (XGBoost ML Signal Generator)
+├── Src_V4/                         ← Main system (XGBoost ML Signal Generator)
 │   ├── core/
-│   │   ├── candle_builder.py       ← สร้าง M10 candle จาก tick data
-│   │   ├── feature_engine.py       ← คำนวณ 40+ features
+│   │   ├── candle_builder.py       ← Builds M10 candles from tick data
+│   │   ├── feature_engine.py       ← Computes 40+ features
 │   │   ├── model_inference.py      ← LambdaMART inference
-│   │   ├── signal_gate.py          ← กรอง signal + state guard
-│   │   ├── state_manager.py        ← จัดการสถานะ EMPTY / HOLDING
-│   │   └── dynamic_tp_manager.py   ← ติดตาม TP แบบ dynamic
+│   │   ├── signal_gate.py          ← Signal filtering + state guard
+│   │   ├── state_manager.py        ← Manages EMPTY / HOLDING state
+│   │   └── dynamic_tp_manager.py   ← Dynamic take-profit tracking
 │   ├── db/
-│   │   ├── supabase_schema.sql     ← DDL ทั้งหมด (v3)
-│   │   └── supabase_writer.py      ← เขียน signal / state / features ลง DB
+│   │   ├── supabase_schema.sql     ← Full DDL (v3)
+│   │   └── supabase_writer.py      ← Writes signal / state / features to DB
 │   ├── scheduler/
 │   │   └── orchestrator.py         ← APScheduler (Job A: M10, Job C: heartbeat)
 │   ├── notifier/
 │   │   └── discord_notifier.py     ← Discord Webhook notification
 │   ├── rationale/
-│   │   └── generator.py            ← สร้าง human-readable rationale
+│   │   └── generator.py            ← Generates human-readable rationale
 │   ├── monitoring/
-│   │   └── pipeline_monitor.py     ← ตรวจสอบ pipeline health
+│   │   └── pipeline_monitor.py     ← Pipeline health monitoring
 │   ├── models/
 │   │   └── lambdamart_v11.json     ← Trained model
-│   ├── tests/                      ← Test suite (pytest)
 │   ├── main.py                     ← Entry point
 │   ├── .env.example
 │   └── requirements.txt
 │
-├── Src/                            ← ระบบสำรอง (ReAct LLM Agent)
+├── Src/                            ← Fallback system (ReAct LLM Agent)
 │   ├── agent_core/                 ← ReAct loop, LLM clients, RiskManager
 │   │   ├── core/prompt.py          ← Prompt engineering
 │   │   ├── core/react.py           ← ReAct agent loop
@@ -146,7 +158,7 @@ Market Data (TwelveData / yfinance)  +  News (GDELT / Finnhub)
 │   ├── main.py                     ← Entry point
 │   └── requirements.txt
 │
-├── Src_V2/                         ← เวอร์ชัน 2 (archived)
+├── Src_V2/                         ← Version 2 (archived)
 │
 ├── Data/
 │   └── Raw/
@@ -173,47 +185,47 @@ Market Data (TwelveData / yfinance)  +  News (GDELT / Finnhub)
 
 ---
 
-## ⚙️ การติดตั้ง
+## ⚙️ Installation
 
 ### Prerequisites
 
-| สิ่งที่ต้องมี | Version | หมายเหตุ |
+| Requirement | Version | Notes |
 |---|---|---|
-| Python | 3.11+ | ทดสอบบน 3.11.x |
-| Supabase project | — | ต้องมี service role key |
+| Python | 3.11+ | Tested on 3.11.x |
+| Supabase project | — | Requires service role key |
 | Discord Webhook | — | Server Settings → Integrations |
-| Model file | lambdamart_v11.json | ได้จาก training pipeline |
+| Model file | lambdamart_v11.json | Produced by the training pipeline |
 
 ---
 
-### 🤖 Src_V4 — ระบบหลัก (ML)
+### 🤖 Src_V4 — Main System (ML)
 
 ```bash
-# 1. เข้าโฟลเดอร์
+# 1. Enter the folder
 cd Src_V4
 
-# 2. สร้าง virtual environment
+# 2. Create a virtual environment
 python3.11 -m venv venv
 source venv/bin/activate        # macOS / Linux
 # venv\Scripts\activate         # Windows
 
-# 3. ติดตั้ง dependencies
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. ตั้งค่า environment variables
+# 4. Configure environment variables
 cp .env.example .env
-# แก้ไข .env ด้วย credentials จริง
+# edit .env with real credentials
 
-# 5. สร้าง Supabase schema
+# 5. Create the Supabase schema
 psql $DATABASE_URL < db/supabase_schema.sql
 
-# 6. ตั้งค่า initial state (ถ้าไม่มีทองในมือ)
+# 6. Set the initial state (if not holding any gold)
 python -c "from db.supabase_writer import init_state; init_state('EMPTY')"
 
-# 7. ทดสอบด้วย dry run ก่อน
+# 7. Try a dry run first
 DRY_RUN=true python main.py
 
-# 8. รัน live
+# 8. Run live
 python main.py
 ```
 
@@ -226,7 +238,7 @@ SUPABASE_KEY=eyJ...                          # service role key
 
 # Discord
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
-DISCORD_MENTION_ID=123456789012345678        # user ID สำหรับ @mention
+DISCORD_MENTION_ID=123456789012345678        # user ID for @mention
 
 # Mode
 DRY_RUN=false                                # true = paper trading
@@ -236,62 +248,32 @@ TIMEZONE=Asia/Bangkok
 
 ---
 
-### 🧠 Src/ — ระบบสำรอง (LLM Agent)
+### 🧠 Src/ — Fallback System (LLM Agent)
 
 ```bash
-# 1. เข้าโฟลเดอร์
+# 1. Enter the folder
 cd Src
 
-# 2. สร้าง virtual environment และติดตั้ง
+# 2. Create a virtual environment and install
 python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# 3. ตั้งค่า environment variables
+# 3. Configure environment variables
 cp .env.example .env
-# ใส่ Gemini / Groq API key, PostgreSQL URL, TwelveData API key
+# fill in Gemini / Groq API key, PostgreSQL URL, TwelveData API key
 
-# 4. รัน one-shot analysis
+# 4. Run a one-shot analysis
 python main.py --provider gemini --skip-fetch
 
-# 5. รัน Gradio dashboard (UI)
+# 5. Run the Gradio dashboard (UI)
 python ui/dashboard.py
 
-# 6. รัน React frontend (ต้องมี Node.js)
+# 6. Run the React frontend (requires Node.js)
 cd frontend
 npm install
 npm run dev
 ```
-
----
-
-## 🧪 การทดสอบ
-
-```bash
-# Src_V4 — รัน test suite ทั้งหมด
-cd Src_V4
-pytest
-
-# รัน test เฉพาะไฟล์
-pytest tests/test_signal_gate.py -v
-
-# รัน paper trading dry-run
-DRY_RUN=true python main.py
-
-# ทดสอบ sell scenarios
-python test_sell_scenarios_dryrun.py
-```
-
-**Test Coverage (Src_V4):**
-
-| Test File | ครอบคลุม |
-|---|---|
-| `test_candle_builder.py` | M10 candle construction |
-| `test_feature_engine.py` | Feature calculation parity |
-| `test_signal_gate.py` | Signal filtering logic |
-| `test_state_manager.py` | EMPTY / HOLDING state transitions |
-| `test_e2e_mock_state_machine.py` | End-to-end flow |
-| `test_snapshot_alignment.py` | Feature snapshot consistency |
 
 ---
 
@@ -307,7 +289,6 @@ python test_sell_scenarios_dryrun.py
 | **Scheduling** | `APScheduler==3.10.4` |
 | **HTTP** | `httpx` |
 | **Logging** | `structlog` |
-| **Testing** | `pytest`, `pytest-mock` |
 
 ### Src/ (LLM Agent)
 
@@ -326,9 +307,9 @@ python test_sell_scenarios_dryrun.py
 
 ## 📊 Feature Engineering (Src_V4)
 
-ระบบคำนวณ **40+ features** จาก M10 candle:
+The system computes **40+ features** from each M10 candle:
 
-| กลุ่ม | Features |
+| Group | Features |
 |---|---|
 | **Trend** | EMA(9), EMA(21), EMA(50), OLS Slope |
 | **Momentum** | RSI(14), MACD, Stochastic |
@@ -339,9 +320,9 @@ python test_sell_scenarios_dryrun.py
 
 ---
 
-## 📚 เอกสารและ Presentation
+## 📚 Documentation & Presentations
 
-| Iteration | เอกสาร |
+| Iteration | Documents |
 |---|---|
 | Phase 1 | [Discovery Report](Documentation/Papers/Phase1_Discovery_Report_Version1.pdf) · [Presentation Iteration 1](Documentation/Presentations/CN240_Presentation_Iteration1.pdf) |
 | Phase 2 | [EDA Notebook](Documentation/Phase2_EDA.ipynb) · [Feature Engineering](Documentation/Phase2_FeatureEngineering.ipynb) · [Presentation Iteration 2](Documentation/Presentations/CN240_Presentation_Iteration2.pdf) |
@@ -352,14 +333,14 @@ python test_sell_scenarios_dryrun.py
 
 ## ⚠️ Disclaimer
 
-> ระบบนี้พัฒนาขึ้นเพื่อ **วัตถุประสงค์ทางการศึกษาเท่านั้น** ไม่ใช่คำแนะนำทางการเงินหรือการลงทุน  
-> การเทรดทองคำมีความเสี่ยงสูง ผู้ใช้รับผิดชอบการตัดสินใจเองทั้งหมด
+> This system was developed for **educational purposes only**. It is not financial or investment advice.  
+> Gold trading carries high risk; users are fully responsible for their own decisions.
 
 ---
 
-## 👥 ทีมงาน
+## 👥 Team
 
-| ชื่อ | Student ID |
+| Name | Student ID |
 |---|---|
 | Athiphat Sunsit | 6710615292 |
 | Purich Ampawa | 6710615185 |
