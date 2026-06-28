@@ -142,9 +142,9 @@ These are hardcoded rules (in `services/agent/agent_core/config/roles.json`), no
 
 | Rule | Detail |
 |---|---|
-| **Position size** | Always ฿1,400 (Aom NOW minimum) |
+| **Position size** | ฿1,000 (Aom NOW minimum) |
 | **Dead zone** | No trading **02:00–06:14** Bangkok time |
-| **BUY** | cash ≥ ฿1,408, not holding, **≥2 of 3** bullish (RSI 40–60, MACD > 0, Price > EMA20), confidence ≥ 0.75 |
+| **BUY** | cash ≥ ฿1,000, not holding, **≥2 of 3** bullish (RSI 40–60, MACD > 0, Price > EMA20), confidence ≥ 0.75 |
 | **Take-Profit** | PnL ≥ +฿300 · or +฿150 & RSI > 65 · or +฿100 & MACD hist < 0 |
 | **Stop-Loss** | PnL ≤ −฿150 · or −฿80 & RSI < 35 · or force-close 01:30–01:59 if holding |
 | **Sessions (weekday)** | night 00:00–01:59 · morning 06:15–11:59 · noon 12:00–17:59 · evening 18:00–23:59 (weekend 09:30–17:30) |
