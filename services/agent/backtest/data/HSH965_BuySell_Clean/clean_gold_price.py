@@ -18,10 +18,10 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 # ── Config ──────────────────────────────────────────────────────────────────
-FOLDER = "Src/backtest/data/HSH965_BuySell_Clean/raw_data"            # เปลี่ยนถ้าไฟล์อยู่ที่อื่น เช่น  r"C:\Downloads\gold"
+FOLDER = "services/agent/backtest/data/HSH965_BuySell_Clean/raw_data"            # เปลี่ยนถ้าไฟล์อยู่ที่อื่น เช่น  r"C:\Downloads\gold"
 TZ_OFFSET = 7           # UTC+7 (เวลาไทย)
-OUTPUT_1MIN = "Src/backtest/data/HSH965_BuySell_Clean/output_hsh/HSH965_gold_1min.csv"
-OUTPUT_5MIN = "Src/backtest/data/HSH965_BuySell_Clean/output_hsh/HSH965_gold_5min.csv"
+OUTPUT_1MIN = "services/agent/backtest/data/HSH965_BuySell_Clean/output_hsh/HSH965_gold_1min.csv"
+OUTPUT_5MIN = "services/agent/backtest/data/HSH965_BuySell_Clean/output_hsh/HSH965_gold_5min.csv"
 DATETIME_FORMAT = "%Y-%m-%d %H.%M"    # 2026-03-30 23.59
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

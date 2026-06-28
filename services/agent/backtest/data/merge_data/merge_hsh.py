@@ -171,12 +171,12 @@ def main():
     parser = argparse.ArgumentParser(description="Merge HSH real prices into backtest CSV")
     parser.add_argument(
         "--merged",
-        default="Src/backtest/data/Final_Merged_Backtest_Data_M5.csv",
+        default="services/agent/backtest/data/Final_Merged_Backtest_Data_M5.csv",
         help="Path to Final_Merged_Backtest_Data_M5.csv",
     )
     parser.add_argument(
         "--hsh",
-        default="Src/backtest/data/HSH965_BuySell_Clean/output/HSH965_gold_5min.csv",
+        default="services/agent/backtest/data/HSH965_BuySell_Clean/output/HSH965_gold_5min.csv",
         help="Path to HSH965_gold_5min.csv",
     )
     parser.add_argument(

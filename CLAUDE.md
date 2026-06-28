@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **นักขุดทอง** — A ReAct-based AI agent for gold trading signal generation (BUY/SELL/HOLD), built for the Aom NOW platform with ฿1,500 fixed capital and ฿1,400 position size. Course project for CN240 Data Science for Signal Processing, Thammasat University.
 
-All source code lives under `Src/`. The comprehensive architecture document is at `Src/about_src.md`.
+All source code lives under `services/agent/`. The comprehensive architecture document is at `services/agent/about_src.md`.
 
 Key capabilities added since initial release:
 - **FastAPI REST layer** (`api/`) — exposes analysis, portfolio, and chart endpoints alongside the Gradio UI
@@ -27,14 +27,14 @@ Key capabilities added since initial release:
 
 ```bash
 pip install -r requirements.txt
-cp Src/.env.example Src/.env  # fill in API keys
+cp services/agent/.env.example services/agent/.env  # fill in API keys
 ```
 
-Required env vars (in `Src/.env`): Gemini API key, Groq API key, PostgreSQL connection, TwelveData API key, GoldAPI key (for live chart), optional Telegram bot token.
+Required env vars (in `services/agent/.env`): Gemini API key, Groq API key, PostgreSQL connection, TwelveData API key, GoldAPI key (for live chart), optional Telegram bot token.
 
 ## Common Commands
 
-All commands run from `Src/`:
+All commands run from `services/agent/`:
 
 ```bash
 # Web dashboard (Gradio UI on http://0.0.0.0:10000)
@@ -56,7 +56,7 @@ python data_engine/extract_features.py
 ### Testing
 
 ```bash
-cd Src
+cd services/agent
 
 # Default run (excludes llm and slow tests — use every commit)
 pytest
