@@ -18,15 +18,15 @@ htmlcov/
 # Ignore actual log files and data storage, but keep the code folders
 **/logs/*.log
 **/logs/logs/
-Src/cache/*.csv
-Src/cache/*.json
-Src/output/*.json
+services/agent/cache/*.csv
+services/agent/cache/*.json
+services/agent/output/*.json
 
 # Exclude large data folder if it exists
-Data/
+data/
 
 # Specific Docker files
 Dockerfile
 .dockerignore
-!Src/logs/*.py
-!Src/logs/__init__.py
+!services/agent/logs/*.py
+!services/agent/logs/__init__.py

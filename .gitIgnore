@@ -49,19 +49,19 @@ __pycache__/
 # Project Data, Outputs & Cache
 # ─────────────────────────────────────────────────────────────────────────
 # Ignore specific data folders and files
-Src/agent_core/data/
-Src/Output/
+services/agent/agent_core/data/
+services/agent/Output/
 Output/
 
 # Specific data files from both branches
 cache_gold_price.csv
 mock_state.json
-Src/agent_core/data/latest.json
-Src/agent_core/data/payload_*.json
+services/agent/agent_core/data/latest.json
+services/agent/agent_core/data/payload_*.json
 
 # Ignore runtime JSON files by default, but keep required model/config schemas trackable.
 *.json
-!Src_V2/models/feature_columns.json
+!archive/src-v2/models/feature_columns.json
 
 # ─────────────────────────────────────────────────────────────────────────
 # Secrets & Environment Variables (CRITICAL)
@@ -85,19 +85,19 @@ htmlcov/
 .~*
 
 # ignore cache file
-Src/cache
+services/agent/cache
 cache
-Data/features_master.csv
-Src/data_engine/interceptor_xauthb_fetch/gold_prices_dataset.csv
+data/features_master.csv
+services/agent/data_engine/interceptor_xauthb_fetch/gold_prices_dataset.csv
 
 # log files
 /logs/
 *.log
 *.log.*
-Src_V2/logs/logs/
-!Src_V2/logs/
-!Src_V2/logs/*.py
-!Src_V2/logs/about_loggerSetup.md
+archive/src-v2/logs/logs/
+!archive/src-v2/logs/
+!archive/src-v2/logs/*.py
+!archive/src-v2/logs/about_loggerSetup.md
 
 
 node_modules/
@@ -108,8 +108,8 @@ CLAUDE.md
 # Supabase migration / DB backup dumps (contain prod data)
 # ─────────────────────────────────────────────────────────────────────────
 backup_*.sql
-Src_V4/hsh_recent.csv
-Src_V4/ig_recent.csv
+services/ml-pipeline/hsh_recent.csv
+services/ml-pipeline/ig_recent.csv
 
 LineChat/
 

@@ -3,8 +3,8 @@ import pandas as pd
 def process_and_calculate_premium():
     # 1. โหลดข้อมูลจากไฟล์ทั้ง 2
     print("กำลังโหลดข้อมูล...")
-    df_spot = pd.read_csv("Src/backtest/data/premium_hsh/Merged_XAUUSD_USDTHB_M1_ThaiTime_Feb_to_Apr.csv")
-    df_hsh = pd.read_csv("Src/backtest/data/premium_hsh/HSH965_gold_1min.csv")
+    df_spot = pd.read_csv("services/agent/backtest/data/premium_hsh/Merged_XAUUSD_USDTHB_M1_ThaiTime_Feb_to_Apr.csv")
+    df_hsh = pd.read_csv("services/agent/backtest/data/premium_hsh/HSH965_gold_1min.csv")
 
     # 2. ปรับแต่งรูปแบบเวลา (Datetime) ให้ตรงกันเพื่อใช้เชื่อมตาราง (Merge)
     # ไฟล์ Spot ให้อ้างอิงคอลัมน์ Datetime_TH
