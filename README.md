@@ -30,7 +30,7 @@
 
 ## 📌 Overview
 
-**นักขุดทอง ("Gold Digger")** analyzes **HSH965** spot-gold prices and pushes **BUY / SELL / HOLD** signals to Discord and Telegram roughly every 10 minutes. The human reads the signal and makes the actual trade — **the system does not trade automatically.** It is tuned for retail gold traders on the Aom NOW platform operating on a fixed **฿1,500 capital / ฿1,400 position size**.
+**นักขุดทอง ("Gold Digger")** analyzes **HSH965** spot-gold prices and pushes **BUY / SELL / HOLD** signals to Discord and Telegram roughly every 10 minutes. The human reads the signal and makes the actual trade — **the system does not trade automatically.** It is tuned for retail gold traders on the Aom NOW platform operating on a fixed **฿1,500 capital**.
 
 The repository ships **two independent systems** that can run side by side, so if one degrades the other keeps producing signals:
 
