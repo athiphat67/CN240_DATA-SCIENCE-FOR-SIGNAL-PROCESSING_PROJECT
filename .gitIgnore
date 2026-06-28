@@ -110,3 +110,10 @@ CLAUDE.md
 backup_*.sql
 Src_V4/hsh_recent.csv
 Src_V4/ig_recent.csv
+
+LineChat/
+
+# ─────────────────────────────────────────────────────────────────────────
+# Local ML datasets, trained models & virtualenvs (multi-GB, not for VCS)
+# ─────────────────────────────────────────────────────────────────────────
+Data_and_Model_ML/
