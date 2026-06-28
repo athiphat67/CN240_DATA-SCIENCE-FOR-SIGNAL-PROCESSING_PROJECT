@@ -43,8 +43,6 @@ The repository ships **two independent systems** that can run side by side, so i
 | **Notifications** | Discord webhook | Discord + Telegram |
 | **Interface** | headless scheduler | Gradio dashboard + React web UI |
 
-> ⚠️ **Educational project only — not financial advice.** Gold trading carries high risk; users are fully responsible for their own decisions.
-
 ---
 
 ## 🏗️ Architecture
