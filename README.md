@@ -22,9 +22,31 @@
 
 **Course:** CN240 — Data Science for Signal Processing · Dept. of Computer Engineering, Thammasat University
 
-[Overview](#-overview) · [Architecture](#%EF%B8%8F-architecture) · [Structure](#-repository-structure) · [Install](#-installation) · [Quick Start](#-quick-start) · [Config](#%EF%B8%8F-configuration) · [Team](#-team)
+[Why](#-why-this-exists) · [Results](#-results) · [Overview](#-overview) · [Architecture](#%EF%B8%8F-architecture) · [Structure](#-repository-structure) · [Install](#-installation) · [Quick Start](#-quick-start) · [Config](#%EF%B8%8F-configuration) · [Team](#-team)
 
 </div>
+
+---
+
+## 💼 Why this exists
+
+Thai retail gold traders on apps like Aom NOW trade small amounts (here a fixed **฿1,500**) against a buy–sell spread that can wipe out small short-term gains. They usually decide by watching charts and reading the news by hand. The real question isn't "will gold go up?". It's **"is *this* 10-minute bar a good enough entry to beat the spread?"**
+
+So we framed it as a **ranking problem**, not price prediction. The model scores each new bar against the others, and only the best-ranked bars become signals. A human still places every trade.
+
+## 📊 Results
+
+| What we tested | How | Result |
+|---|---|---|
+| LambdaMART ranker (`lambdamart_v11`) | Walk-forward backtest, 9 folds | Profitable in **8 of 9** folds |
+| Whole system, real conditions | Live trading with real money, 4 weeks | **78 trades**, compared against the backtest |
+| ReAct LLM agent | Structured (Pydantic) outputs, retries | Runs across **7 LLM providers** with automatic fallback |
+
+**Honest caveat:** 4 weeks and 78 trades is too short to call the strategy profitable long-term. The live run mainly showed whether backtest behaviour held up with real spreads and real execution delays.
+
+## 👤 My role
+
+**Team Lead of a 10-person team.** I built the LambdaMART ranker and designed the ReAct agent (prompts, tools, risk manager). I also ran the live trading evaluation.
 
 ---
 
